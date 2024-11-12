@@ -29,73 +29,131 @@ export def 'data attribute-types' [
 # give test arguments for attributes
 export def 'data attributes' [
   --invalid (-i) # return invalid data instead
+  --rename (-r) # return rename operations instead
 ] {
-  if $invalid {[
-    {name: a_bad_type, type: unknown_atype}
-    {name: a_schema_mismatch, type: a_tag, schema: int}
-  ]} else {[
-    {name: a_tag, type: atype_tag}
-    {name: a_single, type: atype_single, schema: int}
-    {name: a_single_alt, type: atype_single, schema: string}
-    {name: a_multi, type: atype_multi, schema: string}
-  ]}
+  if $rename {
+    if $invalid {[
+      # TODO: setup invalid cases
+    ]} else {[
+      {from: 1, to: 'renamed by id'}
+      {from: a_multi, to: 'renamed by name'}
+    ]}
+  } else {
+    if $invalid {[
+      {name: a_bad_type, type: unknown_atype}
+      {name: a_schema_mismatch, type: a_tag, schema: int}
+    ]} else {[
+      {name: a_tag, type: atype_tag}
+      {name: a_single, type: atype_single, schema: int}
+      {name: a_single_alt, type: atype_single, schema: string}
+      {name: a_multi, type: atype_multi, schema: string}
+    ]}
+  }
 }
 # give test arguments for sources
 export def 'data sources' [
-] { {value: ((seq char A E) | each {|it| 'Source ' + $it })} }
+  --move (-m) # return moving operations instead
+] {
+  if $move {[
+    {from: 2, to: 'moved by id'}
+    {from: 'Source C', to: 'moved by name'}
+  ]} else {
+    {value: ((seq char A E) | each {|it| 'Source ' + $it })}
+  }
+}
 export def 'data entities' [
   --invalid (-i) # return invalid data instead
+  --move (-m) # return moving operations instead
 ] {
-  if $invalid {[
-    {type: 'invalid entity type', source: 1}
-    {type: etype_simple, source: -1}
-    {type: etype_simple, source: 'unknown source'}
-    {type: etype_complex, source: 1, data: 'wrong data'}
-  ]} else {[
-    {type: etype_simple, source: 1}
-    {type: etype_simple, source: 2}
-    {type: etype_complex, source: 3, data: [1 a]}
-    {type: etype_complex, source: 3, data: [2 b]}
-    {type: etype_complex, source: 'Source D', data: [1 a]}
-  ]}
+  if $move {
+    if $invalid {[
+      # TODO: setup invalid cases
+    ]} else {[
+      {type: etype_simple, from: 1, to: 'Source E'}
+      {type: etype_complex, from: {source: 3, data: [1 a]}, to: 5}
+      {type: etype_complex, from: {source: 3, data: [2 b]}, to: {data: [3 c]}}
+      {type: etype_complex, from: {source: 4, data: [1 a]}, to: {source: 5, data: [4 d]}}
+    ]}
+  } else {
+    if $invalid {[
+      {type: 'invalid entity type', source: 1}
+      {type: etype_simple, source: -1}
+      {type: etype_simple, source: 'unknown source'}
+      {type: etype_complex, source: 1, data: 'wrong data'}
+    ]} else {[
+      {type: etype_simple, source: 1}
+      {type: etype_simple, source: 2}
+      {type: etype_complex, source: 3, data: [1 a]}
+      {type: etype_complex, source: 3, data: [2 b]}
+      {type: etype_complex, source: 'Source D', data: [1 a]}
+    ]}
+  }
 }
 export def 'data map entities' [
   --invalid (-i) # return invalid data instead
+  --update (-u) # return update operations instead
 ] {
-  if $invalid {[
-    # TODO: setup invalid cases
-  ]} else {[
-    {type: etype_simple, entity: 1, attribute: a_tag}
-    {type: etype_complex, entity: {source: 3, data: [1 a]}, attribute: 1}
-    {type: etype_complex, entity: {source: 'Source C', data: [2 b]}, attribute: a_single, data: 1}
-    {type: etype_simple, entity: 'Source B', attribute: a_single, data: 2}
-    {type: etype_simple, entity: 2, attribute: a_single_alt, data: 'value'}
-    {type: etype_complex, entity: {source: 4, data: [1 a]}, attribute: a_multi, data: 'some text'}
-    {type: etype_complex, entity: {source: 'Source D', data: [1 a]}, attribute: 4, data: 'other text'}
-  ]}
+  if $update {
+    if $invalid {[
+      # TODO: setup invalid cases
+    ]} else {[
+      {type: etype_simple, attribute: 2, id: 1, data: 42}
+      {type: etype_complex, attribute: 4, id: 2, data: 'changed text'}
+    ]}
+  } else {
+    if $invalid {[
+      # TODO: setup invalid cases
+    ]} else {[
+      {type: etype_simple, entity: 1, attribute: a_tag}
+      {type: etype_complex, entity: {source: 3, data: [1 a]}, attribute: 1}
+      {type: etype_complex, entity: {source: 'Source C', data: [2 b]}, attribute: a_single, data: 1}
+      {type: etype_simple, entity: 'Source B', attribute: a_single, data: 2}
+      {type: etype_simple, entity: 2, attribute: a_single_alt, data: 'value'}
+      {type: etype_complex, entity: {source: 4, data: [1 a]}, attribute: a_multi, data: 'some text'}
+      {type: etype_complex, entity: {source: 'Source D', data: [1 a]}, attribute: 4, data: 'other text'}
+    ]}
+  }
 }
 export def 'data map attributes' [
   --invalid (-i) # return invalid data instead
+  --update (-u) # return update operations instead
 ] {
-  if $invalid {[
-    # TODO: setup invalid cases
-  ]} else {[
-    {from: a_single_alt, to: a_tag}
-    {from: 4, to: 1}
-    {from: 3, to: a_single, data: 42}
-  ]}
+  if $update {
+    if $invalid {[
+      # TODO: setup invalid cases
+    ]} else {[
+      {from: 3, to: 2, id: 1, data: 69}
+    ]}
+  } else {
+    if $invalid {[
+      # TODO: setup invalid cases
+    ]} else {[
+      {from: a_single_alt, to: a_tag}
+      {from: 4, to: 1}
+      {from: 3, to: a_single, data: 42}
+    ]}
+  }
 }
 export def 'data map null' [
   --invalid (-i) # return invalid data instead
+  --update (-u) # return update operations instead
 ] {
-  if $invalid {[
-    # TODO: setup invalid cases
-  ]} else {[
-    {attribute: a_tag}
-    {attribute: 2, data: 12}
-    {attribute: 4, data: 'null value'}
-    {attribute: a_multi, data: 'also null value'}
-  ]}
+  if $update {
+    if $invalid {[
+      # TODO: setup invalid cases
+    ]} else {[
+      {attribute: 'renamed by name', id: 2, data: 'changed value'}
+    ]}
+  } else {
+    if $invalid {[
+      # TODO: setup invalid cases
+    ]} else {[
+      {attribute: a_tag}
+      {attribute: 2, data: 12}
+      {attribute: 4, data: 'null value'}
+      {attribute: a_multi, data: 'also null value'}
+    ]}
+  }
 }
 
 # create colored debug representation
@@ -172,7 +230,7 @@ export def main [
   --delete (-d) # test deletion of database
 ] {
   stor reset
-  let cmds = {} | commands sql | commands db
+  let cmds = commands init | commands sql | commands db
   $cmds | run $.db.init {}
   for et in (data entity-types) {
     $cmds | run $.db.entity-type.add $et
@@ -205,7 +263,30 @@ export def main [
   # TODO: test invalid null mappings
   stor print -l 'after setup'
   if $modify {
-    # TODO: test changing stuff
+    $cmds | run $.db.version.update {program: '1.0', data: '2', config: '0.2'}
+    for s in (data sources --move) {
+      $cmds | run $.db.source.move $s
+    }
+    for e in (data entities --move) {
+      $cmds | run $.db.entity.move $e
+    }
+    # TODO: test invalid entity moves
+    for a in (data attributes --rename) {
+      $cmds | run $.db.attribute.rename $a
+    }
+    # TODO: test invalid attribute renames
+    for m in (data map entities --update) {
+      $cmds | run $.db.map.entity.update $m
+    }
+    # TODO: test invalid entity map updates
+    for m in (data map attributes --update) {
+      $cmds | run $.db.map.attribute.update $m
+    }
+    # TODO: test invalid attribute map updates
+    for m in (data map null --update) {
+      $cmds | run $.db.map.null.update $m
+    }
+    # TODO: test invalid null map updates
     stor print -l 'after changes'
   }
   if $delete {

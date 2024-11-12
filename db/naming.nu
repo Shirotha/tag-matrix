@@ -60,6 +60,9 @@ export def index [
   table: string,
   column: string
 ]: nothing -> string { $'[($table | check | unescape):($column | check | unescape)]' }
+export def 'trigger modified' [
+  table: string
+]: nothing -> string { $'[($table | check | unescape)->modified]' }
 
 export def 'table version' [
 ]: nothing -> string { 'version' }

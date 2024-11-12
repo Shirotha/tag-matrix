@@ -57,10 +57,24 @@ export def 'schema sql table' [
   schema sql row | schema array --wrap-single --length 1..
 }
 
+export def 'commands init' [
+  --file (-f): path
+]: nothing -> record {
+  let db = if ($file | is-not-empty) {
+    open $file
+  } else {
+    stor open
+  }
+  if ($db | describe -d) != {type: custom, subtype: SQLiteDatabase} {
+    error make {msg: "input was not a valid sqlite database"}
+  }
+  {__connection: $db}
+}
 # direct SQL commands (can break database integrity!)
 export def 'commands sql' [
-]: record -> record {
+]: record<__connection> -> record {
   plugin use schema
+  let db = $in.__connection
   $in | merge {sql: {
     generic: {
       args: ({
@@ -68,44 +82,117 @@ export def 'commands sql' [
         params: [[]]
       } | schema struct --wrap-missing)
       action: {|cmd|
-        stor open | query db $cmd.query -p $cmd.params
+        $db | query db $cmd.query -p $cmd.params
       }
     }
     insert: {
       args: ({
         table: (schema sql ident)
         rows: (schema sql table)
-      } | schema struct)
+        allow_conflicts: [[nothing {fallback: false}] bool]
+      } | schema struct --wrap-missing)
       action: {|cmd|
-        $cmd.rows | each { stor insert -t $cmd.table; null }
+        let columns = $cmd.rows | columns
+        if ($columns | length) != ($cmd.rows | first | columns | length) {
+          error make {
+            msg: 'invalid query'
+            label: {
+              text: 'not all columns exist on all rows'
+              span: (metadata $cmd.rows)
+            }
+          }
+        }
+        let column_list = $columns | str join ', '
+        let param_row = $"\(('' | fill -c ', ?' -w ($columns | length) | str substring 2..)\)"
+        let values = $param_row ++ ('' | fill -c (",\n" ++ $param_row) -w ($cmd.rows | length | $in - 1))
+        let result = $db | query db -p ($cmd.rows | each { values } | flatten) $"
+          INSERT INTO ($cmd.table) \(($column_list)\)
+          VALUES ($values)
+          RETURNING *
+        "
+        if not $cmd.allow_conflicts and ($result | length) != ($cmd.rows | length) {
+          error make {
+            msg: 'failed query'
+            label: {
+              text: 'check constraints'
+              span: (metadata $cmd.rows).span
+            }
+          }
+        }
+        $result
       }
     }
     update: {
       args: ({
         table: (schema sql ident)
-        # SAFETY: SQL injection weakness
         # TODO: syntax check / generate where clause
-        where: string
+        where: [string nothing]
+        # TODO: also support keyword parameters
+        params: ([[]] | schema array --wrap-single --wrap-null)
         values: (schema sql row)
-      } | schema struct)
+        single: [[nothing {fallback: false}] bool]
+      } | schema struct --wrap-missing)
       action: {|cmd|
-        stor update -t $cmd.table -w $cmd.where -u $cmd.values; null
+        let where = if ($cmd.where | is-empty) {
+          ''
+        } else {
+          $'WHERE ($cmd.where)'
+        }
+        let updates = $cmd.values | columns | each {|c| $'($c) = ?' } | str join ",\n"
+        let result = $db | query db -p (($cmd.values | values) ++ $cmd.params) $"
+          UPDATE ($cmd.table)
+          SET ($updates)
+          ($where)
+          RETURNING *
+        "
+        if $cmd.single and ($result | length) > 1 {
+          error make {
+            msg: "invalid operation"
+            label: {
+              text: "condition matches more then one row"
+              span: (metadata $cmd.where).span
+            }
+          }
+        }
+        $result
       }
     }
     delete: {
       args: ({
         table: (schema sql ident)
-        # SAFETY: SQL injection weakness
         # TODO: syntax check / generate where clause
-        where: string
-      } | schema struct)
+        where: [string nothing]
+        # TODO: also support keyword parameters
+        params: ([[]] | schema array --wrap-single --wrap-null)
+        single: [[nothing {fallback: false}] bool]
+      } | schema struct --wrap-missing)
       delete: {|cmd|
-        stor delete -t $cmd.table -w $cmd.where; null
+        let where = if ($cmd.where | is-empty) {
+          ''
+        } else {
+          $'WHERE ($cmd.where)'
+        }
+        let result = $db| query db -p $cmd.params $"
+          DELETE FROM ($cmd.table)
+          ($where)
+          RETURNING *
+        "
+        if $cmd.single and ($result | length) > 1 {
+          error make {
+            msg: "invalid operation"
+            label: {
+              text: "condition matches more then one row"
+              span: (metadata $cmd.where).span
+            }
+          }
+        }
+        $result
       }
     }
   }}
 }
 # TODO: add modify commands
+# TODO: add view/select commands
 # TODO: add cleanup/delete commands
 # database related commands
 export def 'commands db' [
@@ -127,30 +214,40 @@ export def 'commands db' [
   def insert [
     table: string
     rows: any
+    --allow-conflicts (-c)
   ]: nothing -> any {
     do $sql_insert.action ({
       table: $table
       rows: $rows
+      allow_conflicts: $allow_conflicts
     } | normalize $sql_insert.args)
   }
   def update [
     table: string
     where: string
     values: record
+    --params (-p): any
+    --single (-s)
   ]: nothing -> any {
     do $sql_update.action ({
       table: $table
       where: $where
+      params: $params
       values: $values
+      single: $single
     } | normalize $sql_update.args)
   }
   def delete [
     table: string
     where: string
+    --params (-p): any
+    --single (-s)
   ]: nothing -> any {
     do $sql_delete.action ({
       table: $table
       where: $where
+      params: $params
+      single: $single
     } | normalize $sql_delete.args)
   }
   def timing-columns [] {
@@ -167,18 +264,20 @@ export def 'commands db' [
       } | schema struct)
       action: {|cmd|
         run 'PRAGMA foreign_keys = ON'
+        run 'PRAGMA recursive_triggers = OFF'
         run $"CREATE TABLE (table version) \(
           (primary-key) INTEGER PRIMARY KEY CHECK\((primary-key) == 42\),
           (column version program) TEXT NOT NULL,
           (column version data) TEXT NOT NULL,
           (column version config) TEXT NOT NULL
         \)"
-        insert (table version) {id: 42,
+        let versions = {id: 42,
           # TODO: don't hardcode versions
           (column version program): '0.1'
           (column version data): '1.0'
           (column version config): '0.1'
         }
+        insert (table version) $versions
         run $"CREATE TABLE (table entity-types) \(
           (column entity-types name) TEXT NOT NULL PRIMARY KEY,
           (column entity-types columns) UNSIGNED_INTEGER NOT NULL CHECK\((column entity-types columns) >= 0\),
@@ -202,6 +301,16 @@ export def 'commands db' [
         \)"
         run $"CREATE INDEX (index (table attributes) (column attributes type))
           ON (table attributes)\((column attributes type)\)
+        "
+        run $"
+          CREATE TRIGGER (trigger modified (table attributes))
+          AFTER UPDATE
+          ON (table attributes)
+          BEGIN
+            UPDATE (table attributes)
+            SET (modified-at) = datetime\('now'\) || 'Z'
+            WHERE (primary-key) == NEW.(primary-key);
+          END
         "
         run $"CREATE TABLE (table type-map entity) \(
           (column type-map entity from) TEXT NOT NULL,
@@ -250,10 +359,115 @@ export def 'commands db' [
         \)"
         run $"CREATE TABLE (table sources) \(
           (primary-key) INTEGER NOT NULL PRIMARY KEY,
-          (column sources value) TEXT NOT NULL UNIQUE
+          (column sources value) TEXT NOT NULL UNIQUE,
+          (timing-columns)
         \)"
+        run $"
+          CREATE TRIGGER (trigger modified (table sources))
+          AFTER UPDATE
+          ON (table sources)
+          BEGIN
+            UPDATE (table sources)
+            SET (modified-at) = datetime\('now'\) || 'Z'
+            WHERE (primary-key) == NEW.(primary-key);
+          END
+        "
+        $versions
       }
     } # init
+    version: {
+      update: {
+        args: ({
+          program: [string nothing]
+          data: [string nothing]
+          config: [string nothing]
+        } | schema struct --wrap-missing)
+        action: {|cmd|
+          def compare [
+            rhs: int
+          ]: int -> int {
+            if $in < $rhs { -1 } else if $in > $rhs { 1 } else { 0}
+          }
+          def 'compare list' [
+            rhs: list<int>
+          ]: list<int> -> int {
+            let zeros = {|i| if $i > 0 {{out: 0, next: ($i - 1)}} }
+            let lhs_w = $in | length
+            let rhs_w = $rhs | length
+            let w = [$lhs_w, $rhs_w] | math max
+            let lhs = $in | append (generate $zeros ($w - $lhs_w))
+            let rhs = $rhs | append (generate $zeros ($w - $rhs_w))
+            for it in ($lhs | zip $rhs) {
+              let cmp = $it.0 | compare $it.1
+              if $cmp != 0 { return $cmp }
+            }
+            0
+          }
+          def 'compare version' [
+            rhs: string
+          ]: string -> int {
+            let lhs = $in | split column '.' | first | values | into int
+            let rhs = $rhs | split column '.' | first | values | into int
+            $lhs | compare list $rhs
+          }
+          let result = run $"
+            SELECT
+              (column version program) AS program,
+              (column version data) AS data,
+              (column version config) AS config
+            FROM (table version)
+            WHERE (primary-key) == 42
+          "
+          mut row = {}
+          if ($cmd.program | is-not-empty) {
+            if ($cmd.program | compare version $result.0.program) != 1 {
+              error make {
+                msg: 'invalid operation'
+                label: {
+                  text: 'expected greater version than current'
+                  span: (metadata $cmd.program).span
+                }
+              }
+            }
+            $row = $row | merge {(column version program): $cmd.program}
+          }
+          if ($cmd.data | is-not-empty) {
+            if ($cmd.data | compare version $result.0.data) != 1 {
+              error make {
+                msg: 'invalid operation'
+                label: {
+                  text: 'expected greater version than current'
+                  span: (metadata $cmd.data).span
+                }
+              }
+            }
+            $row = $row | merge {(column version data): $cmd.data}
+          }
+          if ($cmd.config | is-not-empty) {
+            if ($cmd.config | compare version $result.0.config) != 1 {
+              error make {
+                msg: 'invalid operation'
+                label: {
+                  text: 'expected greater version than current'
+                  span: (metadata $cmd.config).span
+                }
+              }
+            }
+            $row = $row | merge {(column version config): $cmd.config}
+          }
+          if ($row | is-empty) {
+            error make {
+              msg: 'invalid operation'
+              label: {
+                text: 'no columns to update'
+                span: (metadata $cmd).span
+              }
+            }
+          }
+          update (table version) $'(primary-key) == 42' $row
+        }
+      }
+    } # version
     entity-type: {
       add: {
         args: ({
@@ -282,6 +496,16 @@ export def 'commands db' [
           \)"
           run $"CREATE INDEX (index (table entity $cmd.name) (column entity source))
             ON (table entity $cmd.name)\((column entity source)\)
+          "
+          run $"
+            CREATE TRIGGER (trigger modified (table entity $cmd.name))
+            AFTER UPDATE
+            ON (table entity $cmd.name)
+            BEGIN
+              UPDATE (table entity $cmd.name)
+              SET (modified-at) = datetime\('now'\) || 'Z'
+              WHERE (primary-key) == NEW.(primary-key);
+            END
           "
           run $"CREATE VIEW (view entity $cmd.name)
             AS SELECT s.(column sources value) AS (column entity source), e.*
@@ -341,6 +565,7 @@ export def 'commands db' [
       }
     } # attribute-type
     source: {
+      # TODO: version that allows adding source twice? (returning existing rows)
       add: {
         args: ({
           value: ('string' | schema array --wrap-single)
@@ -374,7 +599,8 @@ export def 'commands db' [
               }
             }
           }
-          update (table sources) $"($key) == ($cmd.from)" {
+          # TODO: manual check if to already exists
+          update (table sources) $"($key) == ?" -p [$cmd.from] {
             (column sources value): $cmd.to
           }
         }
@@ -404,7 +630,7 @@ export def 'commands db' [
               }
             }
           }
-          delete (table sources) $"($key) == ($cmd.value)"
+          delete (table sources) $"($key) == ?" -p [$cmd.value]
         }
       }
     } # source
@@ -470,13 +696,90 @@ export def 'commands db' [
             data: [[]] # match against type->schema
           } | schema struct --wrap-single --wrap-missing)
           to: ({
-            source: [string int] # name or id
-            data: [[]] # match against type->schema
+            source: [string int nothing] # name or id (optional)
+            # TODO: only partially specify data instead of all or nothing
+            data: [[]] # match against type->schema (optional)
           } | schema struct --wrap-single --wrap-missing)
         } | schema struct)
         action: {|cmd|
-          # TODO: implement this
-          error make {msg: "not implemented"}
+          let result = run -p [$cmd.type] $"
+            SELECT (column entity-types schema) AS schema
+            FROM (table entity-types)
+            WHERE (column entity-types name) == ?
+          "
+          if ($result | is-empty) {
+            error make {
+              msg: 'invalid operation'
+              label: {
+                text: 'unknown entity type'
+                span: (metadata $cmd.type).span
+              }
+            }
+          }
+          let schema = $result.0.schema | from msgpackz | schema
+          let from_data = $cmd.from.data | normalize $schema
+          mut row = {}
+          if ($cmd.to.source | is-not-empty) {
+            let source = if ($cmd.to.source | describe -d).type == string {
+              let result = run -p [$cmd.to.source] $"
+                SELECT (primary-key) AS id
+                FROM (table sources)
+                WHERE (column sources value) == ?
+              "
+              if ($result | is-empty) {
+                error make {
+                  msg: 'invalid operation'
+                  label: {
+                    text: 'unknown source'
+                    span: (metadata $cmd.to.source).span
+                  }
+                }
+              }
+              $result.0.id
+            } else {
+              $cmd.to.source
+            }
+            $row = $row | merge {(column entity source): $source}
+          }
+          if ($cmd.to.data | is-not-empty) {
+            let to_data = $cmd.to.data | normalize $schema
+            for it in ($to_data | enumerate) {
+              $row = $row | merge {(column entity data $it.index): $it.item}
+            }
+          }
+          if ($row | is-empty) {
+            error make {
+              msg: 'invalid operation'
+              label: {
+                text: 'at least one of source or data has to be not null'
+                span: (metadata $cmd.to).span
+              }
+            }
+          }
+          let source = if ($cmd.from.source | describe -d).type == string {
+            let result = run -p [$cmd.from.source] $"
+              SELECT (primary-key) AS id
+              FROM (table sources)
+              WHERE (column sources value) == ?
+            "
+            if ($result | is-empty) {
+              error make {
+                msg: 'invalid operation'
+                label: {
+                  text: 'unknown source'
+                  span: (metadata $cmd.from.source).span
+                }
+              }
+            }
+            $result.0.id
+          } else {
+            $cmd.from.source
+          }
+          mut where = $'(column entity source) == ?'
+          for i in 0..<($from_data | length) {
+            $where ++= $' AND (column entity data $i) == ?'
+          }
+          update (table entity $cmd.type) $where -p [$source ...$from_data] $row
         }
       }
     } # entity
@@ -543,7 +846,7 @@ export def 'commands db' [
               }
             }
           }
-          update (table attributes) $"($key) == ($cmd.from)" {
+          update (table attributes) $"($key) == ?" -p [$cmd.from] {
             (column attributes name): $cmd.to
           }
         }
@@ -696,6 +999,16 @@ export def 'commands db' [
               run $"CREATE INDEX (index (table map entity $cmd.type $attribute_type) (column map entity to))
                 ON (table map entity $cmd.type $attribute_type)\((column map entity to)\)
               "
+              run $"
+                CREATE TRIGGER (trigger modified (table map entity $cmd.type $attribute_type))
+                AFTER UPDATE
+                ON (table map entity $cmd.type $attribute_type)
+                BEGIN
+                  UPDATE (table map entity $cmd.type $attribute_type)
+                  SET (modified-at) = datetime\('now'\) || 'Z'
+                  WHERE (primary-key) == NEW.(primary-key);
+                END
+              "
               run $"CREATE VIEW (view map entity $cmd.type $attribute_type)
                 AS SELECT m.(created-at), m.(modified-at), m.(primary-key),
                 e.*,
@@ -720,7 +1033,87 @@ export def 'commands db' [
             insert (table map entity $cmd.type $attribute_type) $row
           }
         }
-        # TODO: commands to remove/modify mappings
+        update: {
+          args: ({
+            type: (schema sql ident --strict)
+            attribute: [string int] # name or id
+            id: int
+            # TODO: allow to specify partial data only
+            data: [[]] # match against attribute-type->schema
+          } | schema struct)
+          action: {|cmd|
+            let result = run -p [$cmd.type] $"
+              SELECT COUNT\(*\) AS count
+              FROM (table entity-types)
+              WHERE (column entity-types name) == ?
+            "
+            if $result.0.count == 0 {
+              error make {
+                msg: "invalid operation"
+                label: {
+                  text: "unkown entity type"
+                  span: (metadata $cmd.type).span
+                }
+              }
+            }
+            let key = if ($cmd.attribute | describe -d).type == string {
+              column attributes name
+            } else {
+              primary-key
+            }
+            let result = run -p [$cmd.attribute] $"
+              SELECT (primary-key) AS id, (column attributes type) AS type, (column attributes schema) AS schema
+              FROM (table attributes)
+              WHERE ($key) == ?
+            "
+            if ($result | is-empty) {
+              error make {
+                msg: "invalid operation"
+                label: {
+                  text: "unkown attribute"
+                  span: (metadata $cmd.attribute).span
+                }
+              }
+            }
+            let attribute = $result.0.id
+            let type = $result.0.type
+            let data = $cmd.data | normalize ($result.0.schema | from msgpackz | schema)
+            let result = run -p [$cmd.type, $type] $"
+              SELECT COUNT\(*\) AS count
+              FROM (table type-map entity)
+              WHERE (column type-map entity from) == ? AND (column type-map entity to) == ?
+            "
+            if $result.0.count == 0 {
+              error make {
+                msg: 'invalid operation'
+                label: {
+                  text: 'invalid mapping (table does not exist)'
+                }
+              }
+            }
+            mut row = {}
+            for it in ($data | enumerate) {
+              $row = $row | merge {(column map entity data $it.index): $it.item}
+            }
+            let result = (update
+              (table map entity $cmd.type $type)
+              $"(primary-key) == ? AND (column map entity to) == ?"
+              -p [$cmd.id, $attribute]
+              $row
+            )
+            if ($result | is-empty) {
+              error make {
+                msg: 'invalid operation'
+                label: {
+                  text: 'bad or missing mapping id'
+                  span: (metadata $cmd.id).span
+                }
+              }
+            }
+            $result
+          }
+        }
+        # TODO: commands to remove mappings
       } # entity
       attribute: {
         add: {
@@ -820,6 +1213,16 @@ export def 'commands db' [
               run $"CREATE INDEX (index (table map attribute $from_type $to_type) (column map attribute to))
                 ON (table map attribute $from_type $to_type)\((column map attribute to)\)
               "
+              run $"
+                CREATE TRIGGER (trigger modified (table map attribute $from_type $to_type))
+                AFTER UPDATE
+                ON (table map attribute $from_type $to_type)
+                BEGIN
+                  UPDATE (table map attribute $from_type $to_type)
+                  SET (modified-at) = datetime\('now'\) || 'Z'
+                  WHERE (primary-key) == NEW.(primary-key);
+                END
+              "
               run $"CREATE VIEW (view map attribute $from_type $to_type)
                 AS SELECT m.(created-at), m.(modified-at), m.(primary-key),
                   f.(column attribute-types name) AS (column map attribute from),
@@ -842,6 +1245,93 @@ export def 'commands db' [
               $row = $row | merge {(column map attribute data $it.index): $it.item}
             }
             insert (table map attribute $from_type $to_type) $row
+          }
+        }
+        update: {
+          args: ({
+            from: [string int] # name or id
+            to: [string int] # name or id
+            id: int
+            # TODO: allow to specify partial data only
+            data: [[]] # match against attribute-type->schema
+          } | schema struct)
+          action: {|cmd|
+            let key = if ($cmd.from| describe -d).type == string {
+              column attributes name
+            } else {
+              primary-key
+            }
+            let result = run -p [$cmd.from] $"
+              SELECT (primary-key) AS id, (column attributes type) AS type
+              FROM (table attributes)
+              WHERE ($key) == ?
+            "
+            if ($result | is-empty) {
+              error make {
+                msg: "invalid operation"
+                label: {
+                  text: "unkown attribute"
+                  span: (metadata $cmd.from).span
+                }
+              }
+            }
+            let from = $result.0.id
+            let from_type = $result.0.type
+            let key = if ($cmd.to | describe -d).type == string {
+              column attributes name
+            } else {
+              primary-key
+            }
+            let result = run -p [$cmd.to] $"
+              SELECT (primary-key) AS id, (column attributes type) AS type, (column attributes schema) AS schema
+              FROM (table attributes)
+              WHERE ($key) == ?
+            "
+            if ($result | is-empty) {
+              error make {
+                msg: "invalid operation"
+                label: {
+                  text: "unkown attribute"
+                  span: (metadata $cmd.to).span
+                }
+              }
+            }
+            let to = $result.0.id
+            let to_type = $result.0.type
+            let data = $cmd.data | normalize ($result.0.schema | from msgpackz | schema)
+            let result = run -p [$from_type, $to_type] $"
+              SELECT COUNT\(*\) AS count
+              FROM (table type-map attribute)
+              WHERE (column type-map attribute from) == ? AND (column type-map attribute to) == ?
+            "
+            if $result.0.count == 0 {
+              error make {
+                msg: 'invalid operation'
+                label: {
+                  text: 'invalid mapping (table does not exist)'
+                }
+              }
+            }
+            mut row = {}
+            for it in ($data | enumerate) {
+              $row = $row | merge {(column map attribute data $it.index): $it.item}
+            }
+            let result = (update
+              (table map attribute $from_type $to_type)
+              $"(primary-key) == ? AND (column map attribute from) == ? AND (column map attribute to) == ?"
+              -p [$cmd.id, $from, $to]
+              $row
+            )
+            if ($result | is-empty) {
+              error make {
+                msg: 'invalid operation'
+                label: {
+                  text: 'bad or missing mapping id'
+                  span: (metadata $cmd.id).span
+                }
+              }
+            }
+            $result
           }
         }
       } # attribute
@@ -907,6 +1397,16 @@ export def 'commands db' [
                   ON (table map null $type)\((column map null to)\)
                 "
               }
+              run $"
+                CREATE TRIGGER (trigger modified (table map null $type))
+                AFTER UPDATE
+                ON (table map null $type)
+                BEGIN
+                  UPDATE (table map null $type)
+                  SET (modified-at) = datetime\('now'\) || 'Z'
+                  WHERE (primary-key) == NEW.(primary-key);
+                END
+              "
               run $"CREATE VIEW (view map null $type)
                 AS SELECT m.(created-at), m.(modified-at), m.(primary-key),
                   a.(column attribute-types name) AS (column map null to),
@@ -925,6 +1425,71 @@ export def 'commands db' [
               $row = $row | merge {(column map null data $it.index): $it.item}
             }
             insert (table map null $type) $row
+          }
+        }
+        update: {
+          args: ({
+            attribute: [string int] # name or id
+            id: int
+            # TODO: allow to specify partial data only
+            data: [[]] # match against attribute-type->schema
+          } | schema struct)
+          action: {|cmd|
+            let key = if ($cmd.attribute | describe -d).type == string {
+              column attributes name
+            } else {
+              primary-key
+            }
+            let result = run -p [$cmd.attribute] $"
+              SELECT (primary-key) AS id, (column attributes type) AS type, (column attributes schema) AS schema
+              FROM (table attributes)
+              WHERE ($key) == ?
+            "
+            if ($result | is-empty) {
+              error make {
+                msg: "invalid operation"
+                label: {
+                  text: "unkown attribute"
+                  span: (metadata $cmd.attribute).span
+                }
+              }
+            }
+            let attribute = $result.0.id
+            let type = $result.0.type
+            let data = $cmd.data | normalize ($result.0.schema | from msgpackz | schema)
+            let result = run -p [$type] $"
+              SELECT COUNT\(*\) AS count
+              FROM (table type-map null)
+              WHERE (column type-map null to) == ?
+            "
+            if $result.0.count == 0 {
+              error make {
+                msg: 'invalid operation'
+                label: {
+                  text: 'invalid mapping (table does not exist)'
+                }
+              }
+            }
+            mut row = {}
+            for it in ($data | enumerate) {
+              $row = $row | merge {(column map null data $it.index): $it.item}
+            }
+            let result = (update
+              (table map null $type)
+              $"(primary-key) == ? AND (column map null to) == ?"
+              -p [$cmd.id, $attribute]
+              $row
+            )
+            if ($result | is-empty) {
+              error make {
+                msg: 'invalid operation'
+                label: {
+                  text: 'bad or missing mapping id'
+                  span: (metadata $cmd.id).span
+                }
+              }
+            }
+            $result
           }
         }
       } # null
