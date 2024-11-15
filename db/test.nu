@@ -69,8 +69,8 @@ export def 'data entities' [
     if $invalid {[
       # TODO: setup invalid cases
     ]} else {[
-      {type: etype_simple, from: 1, to: 'Source E'}
-      {type: etype_complex, from: {source: 3, data: [1 a]}, to: 5}
+      {type: etype_simple, from: {source: 1}, to: 'Source E'}
+      {type: etype_complex, from: {source: 3, data: [1 a]}, to: {source: 5}}
       {type: etype_complex, from: {source: 3, data: [2 b]}, to: {data: [3 c]}}
       {type: etype_complex, from: {source: 4, data: [1 a]}, to: {source: 5, data: [4 d]}}
     ]}
@@ -108,7 +108,7 @@ export def 'data map entities' [
       {type: etype_complex, entity: {source: 3, data: [1 a]}, attribute: 1}
       {type: etype_complex, entity: {source: 'Source C', data: [2 b]}, attribute: a_single, data: 1}
       {type: etype_simple, entity: 'Source B', attribute: a_single, data: 2}
-      {type: etype_simple, entity: 2, attribute: a_single_alt, data: 'value'}
+      {type: etype_simple, entity: {source: 2}, attribute: a_single_alt, data: 'value'}
       {type: etype_complex, entity: {source: 4, data: [1 a]}, attribute: a_multi, data: 'some text'}
       {type: etype_complex, entity: {source: 'Source D', data: [1 a]}, attribute: 4, data: 'other text'}
     ]}
@@ -208,7 +208,7 @@ export def 'stor print' [
 # execute command my name
 export def run [
   cmd: cell-path
-  args: record
+  args: any
 ]: record -> any {
   plugin use schema
   print -e $'run command ($cmd | colorize)'
@@ -290,7 +290,14 @@ export def main [
     stor print -l 'after changes'
   }
   if $delete {
-    # TODO: test deleting everything
+    $cmds | run $.db.map.null.delete {attribute: 2, id: 1}
+    $cmds | run $.db.map.entity.delete {type: etype_simple, attribute: 1, id: 1}
+    $cmds | run $.db.attribute.delete {attribute: a_single_alt}
+    $cmds | run $.db.entity.delete {type: etype_simple, entity: 2, force: true}
+    $cmds | run $.db.source.delete {value: 5, force: true}
+    $cmds | run $.db.attribute-type.delete {name: atype_multi, force: true}
+    $cmds | run $.db.entity-type.delete {name: etype_complex, force: true}
+    $cmds | run $.db.clean {}
     stor print -l 'after deletion'
   }
   if ($save | is-not-empty) {
