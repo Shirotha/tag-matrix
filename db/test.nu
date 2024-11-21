@@ -156,10 +156,143 @@ export def 'data map null' [
   }
 }
 
+# execute command my name
+export def run [
+  cmd: cell-path
+  args: any
+  --silent (-s): any # bool
+]: record -> any {
+  plugin use schema
+  let silent = $silent | default false
+  if not $silent {
+    print -e $'run command ($cmd | colorize)'
+    print -e $'arguments: ($args | colorize)'
+  }
+  let cmd = $in | get $cmd
+  let t = date now
+  let args = $args | normalize $cmd.args
+  if not $silent {
+    print -e $'applied schema in (ansi blue)((date now) - $t)(ansi reset)'
+  }
+  let t = date now
+  let result = do $cmd.action $args
+  if not $silent {
+    print -e $'ran command in (ansi blue)((date now) - $t)(ansi reset)'
+  }
+  $result
+}
+
 # create colored debug representation
 def colorize [
 ]: any -> string {
   debug | nu-highlight
+}
+export def 'commands debug' [
+]: record<db> -> record {
+  plugin use schema
+  let cmds = $in
+  def run [
+    args: any
+  ]: cell-path -> any {
+    let cmd = $in
+    let cmd = $cmds | get $cmd
+    do $cmd.action ($args | normalize $cmd.args)
+  }
+  $cmds | merge {debug: {
+    print: {
+      version: {
+        args: ({} | schema struct)
+        action: {|cmd|
+          let version = $.db.version.get | run {}
+          print -e ($version | table)
+        }
+      }
+      entity-types: {
+        args: ({} | schema struct)
+        action: {|cmd|
+          let types = $.db.entity-type.list | run {}
+            | update schema { table -e -i false }
+          print -e ($types | table -e -i false)
+        }
+      }
+      attribute-types: {
+        args: ({} | schema struct)
+        action: {|cmd|
+          let types = $.db.attribute-type.list | run {}
+          print -e ($types | table -e -i false)
+        }
+      }
+      attributes: {
+        args: ({
+          skip: ('int' | schema array --wrap-null)
+        } | schema struct --wrap-single --wrap-missing)
+        action: {|cmd|
+          let attributes = $.db.attribute.list | run {}
+            | where { not ($in.id in $cmd.skip) }
+            | each { select name type }
+          print -e ($attributes | table -e -i false)
+        }
+      }
+      tree: {
+        args: ({
+        } | schema struct)
+        action: {|cmd|
+          def print-subtree [
+            map: record
+            --prefix: string
+            --seen: list<int>
+            --last
+          ] {
+            let prefix = $prefix | default ''
+            let marker = if $last { " \u{2514}" } else { " \u{251C}" }
+            let data = if $map.data_columns != 0 {
+              0..<($map.data_columns) | each {|i| $map | get $'data($i)' } | colorize
+            } else { '' }
+            print -e $'($prefix)($marker)(ansi green)($map.to)(ansi reset)($data)'
+            mut seen = $seen | default []
+            let expand = not ($map.'to:id' in $seen)
+            $seen ++= $map.'to:id'
+            if $expand {
+              let prefix = $prefix ++ (if $last { '  ' } else { " \u{2502}" })
+              let children = $.db.map.attribute.list | run $map.'to:id'
+              let children = $children | columns | reduce -f [] {|type, all| $all ++ ($children | get $type) }
+              for child in ($children | enumerate) {
+                $seen = if $child.index + 1 == ($children | length) {
+                  print-subtree $child.item --prefix $prefix --seen $seen --last
+                } else {
+                  print-subtree $child.item --prefix $prefix --seen $seen
+                }
+              }
+            }
+            $seen
+          }
+          let entities = $.db.entity.list | run {}
+          let types = $entities | columns
+          mut seen = []
+          for type in $types {
+            let type = $.db.entity-type.get | run $type
+            print -e $'(ansi green_bold)($type.name)(ansi reset)'
+            let cmp = $.source ++ (0..<($type.subsource_columns) | each {|i| [$'subsource($i)'] | into cell-path })
+            for entity in ($entities | get $type.name | sort-by ...$cmp) {
+              let subsources = 0..<($type.subsource_columns) | each {|i| $entity | get $'subsource($i)' | colorize }
+              print -e ('  ' ++ (($"(ansi green)($entity.source)(ansi reset)" ++ $subsources) | str join ':'))
+              let attributes = $.db.map.entity.list | run {type: $type.name, entity: $entity.id}
+              let attributes = $attributes | columns | reduce -f [] {|type, all| $all ++ ($attributes | get $type) }
+              for map in ($attributes | enumerate) {
+                let remap = $map.item | rename -c {attribute: to, 'attribute:id': 'to:id'}
+                $seen = if $map.index + 1 == ($attributes | length) {
+                  print-subtree $remap --prefix '  ' --seen $seen --last
+                } else {
+                  print-subtree $remap --prefix '  ' --seen $seen
+                }
+              }
+            }
+          }
+          $seen
+        }
+      }
+    } # print
+  }}
 }
 export def 'stor collect' [
   --no-timings (-t)
@@ -196,109 +329,105 @@ export def 'stor collect' [
 # print the in-memory sqlite database
 export def 'stor print' [
   --label (-l): string
+  --cmds: record<debug>
 ] {
   if ($label | is-not-empty) {
     let label = $'[(ansi reset)(ansi green_bold) ($label) (ansi reset)(ansi blue)]'
     let label = $label | fill --character '=' --alignment center --width (term size).columns
     print -e $'(ansi blue)($label)(ansi reset)'
   }
-  print -e (stor collect --no-timings | table --expand --index false)
+  if ($cmds | is-empty) {
+    print -e (stor collect --no-timings | table --expand --index false)
+  } else {
+    print -e $'(ansi green_underline)version(ansi reset)'
+    $cmds | run $.debug.print.version {} --silent true
+    print -e $'(ansi green_underline)entity types(ansi reset)'
+    $cmds | run $.debug.print.entity-types {} --silent true
+    print -e $'(ansi green_underline)attribute types(ansi reset)'
+    $cmds | run $.debug.print.attribute-types {} --silent true
+    print -e $'(ansi green_underline)entities(ansi reset)'
+    let seen_attributes = $cmds | run $.debug.print.tree {} --silent true
+    print -e $'(ansi green_underline)unused attributes(ansi reset)'
+    $cmds | run $.debug.print.attributes $seen_attributes --silent true
+  }
 }
-
-# execute command my name
-export def run [
-  cmd: cell-path
-  args: any
-]: record -> any {
-  plugin use schema
-  print -e $'run command ($cmd | colorize)'
-  print -e $'arguments: ($args | colorize)'
-  let cmd = $in | get $cmd
-  let t = date now
-  let args = $args | normalize $cmd.args
-  print -e $'applied schema in (ansi blue)((date now) - $t)(ansi reset)'
-  let t = date now
-  let result = do $cmd.action $args
-  print -e $'ran command in (ansi blue)((date now) - $t)(ansi reset)'
-  $result
-}
-
 
 export def main [
   --save (-s): string # store final database in file
   --modify (-m) # test modifiing data
   --delete (-d) # test deletion of database
+  --profile (-p) # print profiling  information
 ] {
   stor reset
-  let cmds = commands init | commands sql | commands db
-  $cmds | run $.db.init {}
+  let cmds = commands init | commands sql | commands db | commands debug
+  $cmds | run $.db.init {} --silent (not $profile)
   for et in (data entity-types) {
-    $cmds | run $.db.entity-type.add $et
+    $cmds | run $.db.entity-type.add $et --silent (not $profile)
   }
   # TODO: test invalid entity types
   for at in (data attribute-types) {
-    $cmds | run $.db.attribute-type.add $at
+    $cmds | run $.db.attribute-type.add $at --silent (not $profile)
   }
   # TODO: test invalid attribute types
   for a in (data attributes) {
-    $cmds | run $.db.attribute.add $a
+    $cmds | run $.db.attribute.add $a --silent (not $profile)
   }
   # TODO: test invalid attributes
-  $cmds | run $.db.source.add (data sources)
+  $cmds | run $.db.source.add (data sources) --silent (not $profile)
   for e in (data entities) {
-    $cmds | run $.db.entity.add $e
+    $cmds | run $.db.entity.add $e --silent (not $profile)
   }
   # TODO: test invalid entities
   for m in (data map entities) {
-    $cmds | run $.db.map.entity.add $m
+    $cmds | run $.db.map.entity.add $m --silent (not $profile)
   }
   # TODO: test invalid entity mappings
   for m in (data map attributes) {
-    $cmds | run $.db.map.attribute.add $m
+    $cmds | run $.db.map.attribute.add $m --silent (not $profile)
   }
   # TODO: test invalid attribute mappings
   for m in (data map null) {
-    $cmds | run $.db.map.null.add $m
+    $cmds | run $.db.map.null.add $m --silent (not $profile)
   }
   # TODO: test invalid null mappings
-  stor print -l 'after setup'
+  stor print -l 'after setup' --cmds $cmds
   if $modify {
-    $cmds | run $.db.version.update {program: '1.0', data: '2', config: '0.2'}
+    $cmds | run $.db.version.update {program: '1.0', data: '2', config: '0.2'} --silent (not $profile)
     for s in (data sources --move) {
-      $cmds | run $.db.source.move $s
+      $cmds | run $.db.source.move $s --silent (not $profile)
     }
     for e in (data entities --move) {
-      $cmds | run $.db.entity.move $e
+      $cmds | run $.db.entity.move $e --silent (not $profile)
     }
     # TODO: test invalid entity moves
     for a in (data attributes --rename) {
-      $cmds | run $.db.attribute.rename $a
+      $cmds | run $.db.attribute.rename $a --silent (not $profile)
     }
     # TODO: test invalid attribute renames
     for m in (data map entities --update) {
-      $cmds | run $.db.map.entity.update $m
+      $cmds | run $.db.map.entity.update $m --silent (not $profile)
     }
     # TODO: test invalid entity map updates
     for m in (data map attributes --update) {
-      $cmds | run $.db.map.attribute.update $m
+      $cmds | run $.db.map.attribute.update $m --silent (not $profile)
     }
     # TODO: test invalid attribute map updates
     for m in (data map null --update) {
-      $cmds | run $.db.map.null.update $m
+      $cmds | run $.db.map.null.update $m --silent (not $profile)
     }
     # TODO: test invalid null map updates
-    stor print -l 'after changes'
+    stor print -l 'after changes' --cmds $cmds
   }
   if $delete {
-    $cmds | run $.db.map.null.delete {attribute: 2, id: 1}
-    $cmds | run $.db.map.entity.delete {type: etype_simple, attribute: 1, id: 1}
-    $cmds | run $.db.attribute.delete {attribute: a_single_alt}
-    $cmds | run $.db.entity.delete {type: etype_simple, entity: 2, force: true}
-    $cmds | run $.db.source.delete {value: 5, force: true}
-    $cmds | run $.db.attribute-type.delete {name: atype_multi, force: true}
-    $cmds | run $.db.entity-type.delete {name: etype_complex, force: true}
-    $cmds | run $.db.clean {}
-    stor print -l 'after deletion'
+    $cmds | run $.db.map.null.delete {attribute: 2, id: 1} --silent (not $profile)
+    $cmds | run $.db.map.entity.delete {type: etype_simple, attribute: 1, id: 1} --silent (not $profile)
+    $cmds | run $.db.attribute.delete {attribute: a_single_alt} --silent (not $profile)
+    $cmds | run $.db.entity.delete {type: etype_simple, entity: 2, force: true} --silent (not $profile)
+    $cmds | run $.db.source.delete {value: 5, force: true} --silent (not $profile)
+    $cmds | run $.db.attribute-type.delete {name: atype_multi, force: true} --silent (not $profile)
+    $cmds | run $.db.entity-type.delete {name: etype_complex, force: true} --silent (not $profile)
+    $cmds | run $.db.clean {} --silent (not $profile)
+    stor print -l 'after deletion' --cmds $cmds
   }
   if ($save | is-not-empty) {
     stor export -f $save

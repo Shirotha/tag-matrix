@@ -52,6 +52,10 @@ def check-non-negative [
 
 export def primary-key [
 ]: nothing -> string { 'id' }
+export def namespaced [
+  first: string
+  ...rest: string
+]: nothing -> string { $"[($first | check | unescape):($rest | each { check | unescape } | str join ':')]" }
 export def created-at [
 ]: nothing -> string { 'created_at' }
 export def modified-at [
@@ -78,7 +82,7 @@ export def 'table entity-types' [
 export def 'column entity-types name' [
 ]: nothing -> string { 'name' }
 export def 'column entity-types columns' [
-]: nothing -> string { 'data_column_count' }
+]: nothing -> string { 'subsource_columns' }
 export def 'column entity-types schema' [
 ]: nothing -> string { 'schema' }
 
@@ -89,7 +93,7 @@ export def 'column attribute-types name' [
 export def 'column attribute-types unique' [
 ]: nothing -> string { 'is_unique' }
 export def 'column attribute-types columns' [
-]: nothing -> string { 'data_column_count' }
+]: nothing -> string { 'data_columns' }
 
 export def 'table type-map entity' [
 ]: nothing -> string { 'entity_maps' }
@@ -120,18 +124,20 @@ export def 'column entity source' [
 ]: nothing -> string { 'source' }
 export def 'column entity data' [
   i: int
-]: nothing -> string { $'sub_source($i | check-non-negative)' }
+]: nothing -> string { $'subsource($i | check-non-negative)' }
 export def 'view entity' [
   type: string
 ]: nothing -> string { $'[@(table entity $type | unescape)]' }
 export def 'table attributes' [
-]: nothing -> string { $'attributes' }
+]: nothing -> string { 'attributes' }
 export def 'column attributes name' [
 ]: nothing -> string { 'name' }
 export def 'column attributes type' [
 ]: nothing -> string { 'type' }
 export def 'column attributes schema' [
 ]: nothing -> string { 'schema' }
+export def 'view attributes' [
+]: nothing -> string { '[@attributes]' }
 
 export def 'table map entity' [
   entity: string

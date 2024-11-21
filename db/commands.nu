@@ -234,10 +234,9 @@ export def 'commands sql' [
   }}
 }
 # TODO: add view/select commands
-#   - get single source/entity/attribute/mapping by proper info (same as update/delete arguments)
+#   - custom where syntax for custom search queries
 #   - search for sources/entities/attributes/mappings by partial info (return all matching) (full text search)
-#   - list all attributes of entity/attribute/null (forward edges)
-#   - list all entities/attributes/null that use attribute (backwards edges)
+
 # database related commands
 export def 'commands db' [
 ]: record<sql: record> -> record {
@@ -328,20 +327,32 @@ export def 'commands db' [
     }
     $result
   }
-  def sql-count [
+  def sql-exists [
     table: string
     where: string
     --params (-p): any
-  ]: nothing -> int {
+    --check-missing (-m): string
+    --span (-s): any
+  ]: nothing -> bool {
     let where = if ($where | is-not-empty) {
       $'WHERE ($where)'
     } else { '' }
     let result = sql-run -p $params $"
-      SELECT COUNT\(*\) AS count
-      FROM ($table)
-      ($where)
+      SELECT EXISTS\(
+        SELECT 1 FROM ($table)
+        ($where)
+      \) AS result
     "
-    $result.0.count
+    if ($check_missing | is-not-empty) and $result.0.result == 0 {
+      error make {
+        msg: 'invalid operation'
+        label: {
+          text: $'($check_missing) does not exist'
+          span: ($span | default (metadata $table).span)
+        }
+      }
+    }
+    $result.0.result != 0
   }
   def 'data where' [
     column: closure
@@ -372,16 +383,12 @@ export def 'commands db' [
       " -e 'source not found' -s (metadata $info).span
       $result.0.id
     } else {
-      let result = sql-count (table sources) $'(primary-key) == ?' -p [$info]
-      if $result == 0 {
-        error make {
-          msg: 'invalid operation'
-          label: {
-            text: 'source not found'
-            span: (metadata $info).span
-          }
-        }
-      }
+      (sql-exists
+        (table sources)
+        $'(primary-key) == ?'
+        -p [$info]
+        -m source -s (metadata $info).span
+      )
       $info
     }
   }
@@ -402,28 +409,20 @@ export def 'commands db' [
           " -e 'entity type does not exist' -s (metadata $type).span
           $schema = $result.0.schema | from msgpackz | schema
         } else {
-          let result = sql-count (table entity-types) $'(column entity-types name) == ?' -p [$type]
-          if $result == 0 {
-            error make {
-              msg: 'invalid operation'
-              label: {
-                text: 'entity type does not exist'
-                span: (metadata $type).span
-              }
-            }
-          }
+          (sql-exists
+            (table entity-types)
+            $'(column entity-types name) == ?'
+            -p [$type]
+            -m 'entity type' -s (metadata $type).span
+          )
         }
       }
-      let result = sql-count (table entity $type) $'(primary-key) == ?' -p [$info]
-      if $result == 0 {
-        error make {
-          msg: 'invalid operation'
-          label: {
-            text: 'entity not found'
-            span: (metadata $info).span
-          }
-        }
-      }
+      (sql-exists
+        (table entity $type)
+        $'(primary-key) == ?'
+        -p [$info]
+        -m entity -s (metadata $info).span
+      )
       $info
     } else {
       $schema = if ($schema | is-empty) {
@@ -470,6 +469,102 @@ export def 'commands db' [
       $result.0
     }
   }
+  # get all entity type names
+  def get-entity-types [
+    --for (-f): string # only types that have mappings to single attribute type
+    --type (-t): string # filter to single entity type
+  ] {
+    if ($type | is-empty) {
+      let result = if ($for | is-empty) {
+        sql-run $"
+          SELECT (column entity-types name) AS types
+          FROM (table entity-types)
+        "
+      } else {
+        sql-run -p [$for] $"
+          SELECT (column type-map entity from) AS types
+          FROM (table type-map entity)
+          WHERE (column type-map entity to) == ?
+        "
+      }
+      $result.types
+    } else {
+      (sql-exists
+        (table entity-types)
+        $'(column entity-types name) == ?'
+        -p [$type]
+        -m 'entity type' -s (metadata $type).span
+      )
+      if ($for | is-not-empty) {
+        let result = (sql-exists
+          (table type-map entity)
+          $'(column type-map entity from) == ? AND (column type-map entity to) == ?'
+          -p [$type, $for]
+        )
+        if not $result { return [] }
+      }
+      $type
+    }
+  }
+  # get all attribute type names
+  def get-attribute-types [
+    --for (-f): string # only types that have mappings to single attribute type
+    --type (-t): string # filter to single attribute type
+  ] {
+    if ($type | is-empty) {
+      let result = if ($for | is-empty) {
+        sql-run $"
+          SELECT (column attribute-types name) AS types
+          FROM (table attribute-types)
+        "
+      } else {
+        sql-run -p [$for] $"
+          SELECT (column type-map attribute from) AS types
+          FROM (table type-map attribute)
+          WHERE (column type-map attribute to) == ?
+        "
+      }
+      $result.types
+    } else {
+      (sql-exists
+        (table attribute-types)
+        $'(column attribute-types name) == ?'
+        -p [$type]
+        -m 'attribute type' -s (metadata $type).span
+      )
+      if ($for | is-not-empty) {
+        let result = (sql-exists
+          (table type-map attribute)
+          $'(column type-map attribute from) == ? AND (column type-map attribute to) == ?'
+          -p [$type, $for]
+        )
+        if not $result { return [] }
+      }
+      $type
+    }
+  }
+  def update-timings [] {
+    update (created-at) { into datetime }
+    | update (modified-at) { into datetime }
+  }
+  def update-entity-type [] {
+    update (column entity-types schema) { from msgpackz | schema }
+  }
+  def update-attribute-type [] {
+    update (column attribute-types unique) { $in != 0 }
+  }
+  def update-source [] { update-timings }
+  def update-entity [] { update-timings }
+  def update-attribute [
+    --view (-v)
+  ] {
+    let result = $in | update (column attributes schema) { from msgpackz | schema }
+    | update-timings
+    if $view {
+      $result | update (column attribute-types unique) { $in != 0 }
+    } else { $result }
+  }
+  def update-map [] { update-timings }
   def timing-columns [] {
     # NOTE: store date using `$date | format date "%+"` (sql query param will implicit cast)
     # NOTE: load date using `$str | into datetime`
@@ -531,6 +626,19 @@ export def 'commands db' [
             SET (modified-at) = datetime\('now'\) || 'Z'
             WHERE (primary-key) == NEW.(primary-key);
           END
+        "
+        sql-run $"CREATE VIEW (view attributes)
+          AS SELECT
+            a.(primary-key),
+            a.(column attributes name),
+            a.(column attributes type),
+            t.(column attribute-types unique),
+            t.(column attribute-types columns),
+            a.(column attributes schema),
+            a.(created-at),
+            a.(modified-at)
+          FROM (table attributes) a
+          LEFT JOIN (table attribute-types) t ON a.(column attributes type) == t.(column attribute-types name)
         "
         sql-run $"CREATE TABLE (table type-map entity) \(
           (column type-map entity from) TEXT NOT NULL,
@@ -599,23 +707,33 @@ export def 'commands db' [
       args: ({} | schema struct)
       action: {|cmd|
         let result = sql-run $"
-          SELECT (column type-map entity from) AS from_, (column type-map entity to) AS to_
+          SELECT (column type-map entity from) AS from_, (column type-map entity to) AS to_, rowid
           FROM (table type-map entity)
         "
         for it in $result {
-          let result = sql-count (table map entity $it.from_ $it.to_) ''
-          if $result == 0 {
+          let result = sql-exists (table map entity $it.from_ $it.to_) ''
+          if not $result {
+            (sql-delete
+              (table type-map entity)
+              'rowid == ?'
+              -p [$it.rowid]
+            )
             sql-run $"DROP VIEW (view map entity $it.from_ $it.to_)"
             sql-run $"DROP TABLE (table map entity $it.from_ $it.to_)"
           }
         }
         let result = sql-run $"
-          SELECT (column type-map attribute from) AS from_, (column type-map attribute to) AS to_
+          SELECT (column type-map attribute from) AS from_, (column type-map attribute to) AS to_, rowid
           FROM (table type-map attribute)
         "
         for it in $result {
-          let result = sql-count (table map attribute $it.from_ $it.to_) ''
-          if $result == 0 {
+          let result = sql-exists (table map attribute $it.from_ $it.to_) ''
+          if not $result {
+            (sql-delete
+              (table type-map attribute)
+              'rowid == ?'
+              -p [$it.rowid]
+            )
             sql-run $"DROP VIEW (view map attribute $it.from_ $it.to_)"
             sql-run $"DROP TABLE (table map attribute $it.from_ $it.to_)"
           }
@@ -625,26 +743,33 @@ export def 'commands db' [
           FROM (table type-map null)
         "
         for it in $result {
-          let result = sql-count (table map null $it.to_) ''
-          if $result == 0 {
+          let result = sql-exists (table map null $it.to_) ''
+          if not $result {
+            (sql-delete
+              (table type-map null)
+              $'(column type-map null to) == ?'
+              -p [$it.to_]
+            )
             sql-run $"DROP VIEW (view map null $it.to_)"
             sql-run $"DROP TABLE (table map null $it.to_)"
-          }
-        }
-        let result = sql-run $"
-          SELECT (column entity-types name) AS name
-          FROM (table entity-types)
-        "
-        for type in $result.name {
-          let result = sql-count (table entity $type) ''
-          if $result == 0 {
-            sql-run $"DROP VIEW (view entity $type)"
-            sql-run $"DROP TABLE (table entity $type)"
           }
         }
       }
     } # clean
     version: {
+      get: {
+        args: ({} | schema struct)
+        action: {|cmd|
+          sql-run $"
+            SELECT
+              (column version program),
+              (column version data),
+              (column version config)
+            FROM (table version)
+            WHERE (primary-key) == 42
+          " | first
+        }
+      }
       update: {
         args: ({
           program: [string nothing]
@@ -733,7 +858,7 @@ export def 'commands db' [
               }
             }
           }
-          sql-update (table version) $'(primary-key) == 42' $row
+          sql-update (table version) $'(primary-key) == 42' $row | first
         }
       }
     } # version
@@ -776,8 +901,16 @@ export def 'commands db' [
               WHERE (primary-key) == NEW.(primary-key);
             END
           "
+          let view_columns = 0..<($columns) | each { $"e.(column entity data $in),\n" } | str join
           sql-run $"CREATE VIEW (view entity $cmd.name)
-            AS SELECT s.(column sources value) AS (column entity source), e.*
+            AS SELECT
+              e.(primary-key),
+              e.(column entity source) AS (namespaced (column entity source) (primary-key)),
+              s.(column sources value) AS (column entity source),
+              ($columns) AS (column entity-types columns),
+              ($view_columns)
+              e.(created-at),
+              e.(modified-at)
             FROM (table entity $cmd.name) e
             LEFT JOIN (table sources) s ON e.(column entity source) == s.(primary-key)
           "
@@ -785,18 +918,39 @@ export def 'commands db' [
             (column entity-types name): $cmd.name
             (column entity-types columns): $columns
             (column entity-types schema): ($cmd.schema | schema data-schema | to msgpackz)
-          }
+          } | first | update-entity-type
+        }
+      }
+      get: {
+        args: ({
+          name: (schema sql ident --strict)
+        } | schema struct --wrap-single)
+        action: {|cmd|
+          sql-run -p [$cmd.name] $"
+            SELECT *
+            FROM (table entity-types)
+            WHERE (column entity-types name) == ?
+          " -e 'entity type not found' -s (metadata $cmd.name).span | first | update-entity-type
+        }
+      }
+      list: {
+        args: ({} | schema struct)
+        action: {|cmd|
+          sql-run $"
+            SELECT *
+            FROM (table entity-types)
+          " | update-entity-type
         }
       }
       delete: {
         args: ({
           name: (schema sql ident --strict)
           force: [[nothing {fallback: false}] bool]
-        } | schema struct --wrap-missing)
+        } | schema struct --wrap-single --wrap-missing)
         action: {|cmd|
           if not $cmd.force {
-            let result = sql-count (table entity $cmd.name) ''
-            if result != 0 {
+            let result = sql-exists (table entity $cmd.name) ''
+            if $result {
               error make {
                 msg: 'invalid operation'
                 label: {
@@ -814,7 +968,7 @@ export def 'commands db' [
           }
           sql-run $"DROP VIEW (view entity $cmd.name)"
           sql-run $"DROP TABLE (table entity $cmd.name)"
-          sql-delete (table entity-types) $'(column entity-types name) == ?' -p [$cmd.name]
+          sql-delete (table entity-types) $'(column entity-types name) == ?' -p [$cmd.name] | first | update-entity-type
         }
       }
     } # entity-type
@@ -830,7 +984,28 @@ export def 'commands db' [
             (column attribute-types name): $cmd.name
             (column attribute-types unique): $cmd.unique
             (column attribute-types columns): $cmd.columns
-          }
+          } | first | update-attribute-type
+        }
+      }
+      get: {
+        args: ({
+          name: (schema sql ident --strict)
+        } | schema struct --wrap-single)
+        action: {|cmd|
+          sql-run -p [$cmd.name] $"
+            SELECT *
+            FROM (table attribute-types)
+            WHERE (column attribute-types name) == ?
+          " -e 'attribute type not found' -s (metadata $cmd.name).span | first | update-attribute-type
+        }
+      }
+      list: {
+        args: ({} | schema struct)
+        action: {|cmd|
+          sql-run $"
+            SELECT *
+            FROM (table attribute-types)
+          " | update-attribute-type
         }
       }
       delete: {
@@ -840,8 +1015,8 @@ export def 'commands db' [
         } | schema struct --wrap-missing)
         action: {|cmd|
           if not $cmd.force {
-            let result = sql-count (table attributes) $'(column attributes type) == ?' -p [$cmd.name]
-            if $result != 0 {
+            let result = sql-exists (table attributes) $'(column attributes type) == ?' -p [$cmd.name]
+            if $result {
               error make {
                 msg: 'invalid operation'
                 label: {
@@ -878,7 +1053,7 @@ export def 'commands db' [
             $'(column attribute-types name) == ?'
             -p [$cmd.name]
             -e 'attribute type not found'
-          )
+          ) | first | update-attribute-type
         }
       }
     } # attribute-type
@@ -889,7 +1064,33 @@ export def 'commands db' [
           value: ('string' | schema array --wrap-single)
         } | schema struct)
         action: {|cmd|
-          sql-insert (table sources) ($cmd.value | wrap (column sources value))
+          sql-insert (table sources) ($cmd.value | wrap (column sources value)) | first | update-source
+        }
+      }
+      get: {
+        args: ({
+          value: (schema source)
+        } | schema struct --wrap-single)
+        action: {|cmd|
+          let key = if ($cmd.value | describe -d).type == string {
+            column sources value
+          } else {
+            primary-key
+          }
+          sql-run -p [$cmd.value] $"
+            SELECT *
+            FROM (table sources)
+            WHERE ($key) == ?
+          " -e 'source not found' | first | update-source
+        }
+      }
+      list: {
+        args: ({} | schema struct)
+        action: {|cmd|
+          sql-run $"
+            SELECT *
+            FROM (table sources)
+          " | update-source
         }
       }
       move: {
@@ -902,7 +1103,7 @@ export def 'commands db' [
           # TODO: manual check if to already exists
           sql-update (table sources) $"(primary-key) == ?" -p [$from] {
             (column sources value): $cmd.to
-          }
+          } | first | update-source
         }
       }
       delete: {
@@ -918,8 +1119,8 @@ export def 'commands db' [
               FROM (table entity-types)
             "
             for type in $result.name {
-              let result = sql-count (table entity $type) $'(column entity source) == ?' -p [$value]
-              if $result != 0 {
+              let result = sql-exists (table entity $type) $'(column entity source) == ?' -p [$value]
+              if $result {
                 error make {
                   msg: 'invalid operation'
                   label: {
@@ -930,7 +1131,7 @@ export def 'commands db' [
               }
             }
           }
-          sql-delete (table sources) $"(primary-key) == ?" -p [$value]
+          sql-delete (table sources) $"(primary-key) == ?" -p [$value] | first | update-source
         }
       }
     } # source
@@ -952,9 +1153,87 @@ export def 'commands db' [
           let data = $cmd.data | normalize ($result.0.schema | from msgpackz | schema)
           sql-insert (table entity $cmd.type) ({
             (column entity source): $source
-          } | data merge {column entity data $in} $data)
+          } | data merge {column entity data $in} $data) | first | update-entity
         }
       }
+      get: {
+        args: ({
+          type: (schema sql ident --strict)
+          entity: (schema entity)
+        } | schema struct)
+        action: {|cmd|
+          let entity = get-entity $cmd.type $cmd.entity
+          sql-run -p [$entity] $"
+            SELECT *
+            FROM (view entity $cmd.type)
+            WHERE (primary-key) == ?
+          " | first | update-entity
+        }
+      }
+      list: {
+        args: ({
+          type: [(schema sql ident --strict) nothing]
+        } | schema struct --wrap-single --wrap-missing)
+        action: {|cmd|
+          let types = get-entity-types -t $cmd.type
+          $types | each {|type|
+            let result = sql-run $"
+              SELECT *
+              FROM (view entity $type)
+            " | update-entity
+            [$type, $result]
+          } | into record
+        }
+      }
+      attributes: {
+        args: ({
+          type: (schema sql ident --strict)
+          entity: (schema entity)
+        } | schema struct)
+        action: {|cmd|
+          let entity = get-entity $cmd.type $cmd.entity
+          let result = sql-run -p [$cmd.type] $"
+            SELECT (column type-map entity to) AS types
+            FROM (table type-map entity)
+            WHERE (column type-map entity from) == ?
+          "
+          $result.types | each {|type|
+            sql-run -p [$entity] $"
+              SELECT *
+              FROM (view attributes)
+              WHERE (primary-key) IN \(
+                SELECT (column map entity to)
+                FROM (table map entity $cmd.type $type)
+                WHERE (column map entity from) == ?
+              \)
+            "
+          } | flatten | update-attribute --view
+        }
+      }
+      with: {
+        attribute: {
+          args: ({
+            type: [(schema sql ident --strict) nothing]
+            attribute: (schema attribute)
+          } | schema struct --wrap-single --wrap-missing)
+          action: {|cmd|
+            let attribute = get-attribute $cmd.attribute
+            let types = get-entity-types -t $cmd.type -f $attribute.type
+            $types | each {|type|
+              let result = sql-run -p [$attribute.id] $"
+                SELECT *
+                FROM (view entity $type)
+                WHERE (primary-key) IN \(
+                  SELECT (column map entity from)
+                  FROM (table map entity $type $attribute.type)
+                  WHERE (column map entity to) == ?
+                \)
+              " | update-entity
+              if ($result | is-not-empty) { [$type, $result] }
+            } | into record
+          }
+        }
+      } # with
       move: {
         args: ({
           type: (schema sql ident --strict)
@@ -985,7 +1264,7 @@ export def 'commands db' [
               }
             }
           }
-          sql-update (table entity $cmd.type) $'(primary-key) == ?' -p [$from.id] $row
+          sql-update (table entity $cmd.type) $'(primary-key) == ?' -p [$from.id] $row | first | update-entity
         }
       }
       delete: {
@@ -1003,8 +1282,8 @@ export def 'commands db' [
               WHERE (column type-map entity from) == ?
             "
             for to in $result.to_ {
-              let result = sql-count (table map entity $cmd.type $to) $'(column map entity from) == ?' -p [$entity]
-              if result != 0 {
+              let result = sql-exists (table map entity $cmd.type $to) $'(column map entity from) == ?' -p [$entity]
+              if $result {
                 error make {
                   msg: 'invalid operation'
                   label: {
@@ -1015,7 +1294,7 @@ export def 'commands db' [
               }
             }
           }
-          sql-delete (table entity $cmd.type) $'(primary-key) == ?' -p [$entity]
+          sql-delete (table entity $cmd.type) $'(primary-key) == ?' -p [$entity] | first | update-entity
         }
       }
     } # entity
@@ -1045,9 +1324,82 @@ export def 'commands db' [
             (column attributes name): $cmd.name
             (column attributes type): $cmd.type
             (column attributes schema): ($cmd.schema | schema data-schema | to msgpackz)
-          }
+          } | first | update-attribute
         }
       }
+      get: {
+        args: ({
+          attribute: (schema attribute)
+        } | schema struct --wrap-single)
+        action: {|cmd|
+          let key = if ($cmd.attribute | describe -d).type == string {
+            column attributes name
+          } else {
+            primary-key
+          }
+          sql-run -p [$cmd.attribute] $"
+            SELECT *
+            FROM (view attributes)
+            WHERE ($key) == ?
+          " -e 'attribute not found' | first | update-attribute --view
+        }
+      }
+      list: {
+        args: ({} | schema struct --wrap-single --wrap-missing)
+        action: {|cmd|
+          sql-run $"
+            SELECT *
+            FROM (view attributes)
+          " | update-attribute --view
+        }
+      }
+      attributes: {
+        args: ({
+          attribute: (schema attribute)
+        } | schema struct --wrap-single)
+        action: {|cmd|
+          let attribute = get-attribute $cmd.attribute
+          let result = sql-run -p [$attribute.type] $"
+            SELECT (column type-map attribute to) AS types
+            FROM (table type-map attribute)
+            WHERE (column type-map attribute from) == ?
+          "
+          $result.types | each {|type|
+            sql-run -p [$attribute.id] $"
+              SELECT *
+              FROM (view attributes)
+              WHERE (primary-key) IN \(
+                SELECT (column map attribute to)
+                FROM (table map attribute $attribute.type $type)
+                WHERE (column map attribte from) == ?
+              \)
+            "
+          } | flatten | update-attribute --view
+        }
+      }
+      with: {
+        attribute: {
+          args: ({
+            type: [(schema sql ident --strict) nothing]
+            attribute: (schema attribute)
+          } | schema struct --wrap-single --wrap-missing)
+          action: {|cmd|
+            let attribute = get-attribute $cmd.attribute
+            let types = get-attribute-types -t $cmd.type -f $attribute.type
+            $types | each {|type|
+              sql-run -p [$attribute.id] $"
+                SELECT *
+                FROM (view attributes)
+                WHERE (primary-key) IN \(
+                  SELECT (column map attribute from)
+                  FROM (table map attribute $type $attribute.type)
+                  WHERE (column map attribute to) == ?
+                \)
+              "
+            } | flatten | update-attribute --view
+          }
+        }
+      } # with
       rename: {
         args: ({
           from: (schema attribute)
@@ -1057,7 +1409,7 @@ export def 'commands db' [
           let from = get-attribute $cmd.from
           sql-update (table attributes) $"(primary-key) == ?" -p [$from.id] {
             (column attributes name): $cmd.to
-          }
+          } | first | update-attribute
         }
       }
       delete: {
@@ -1074,12 +1426,12 @@ export def 'commands db' [
               WHERE (column type-map entity to) == ?
             "
             for type in $result.type {
-              let result = (sql-count
+              let result = (sql-exists
                 (table map entity $type $attribute.type)
                 $'(column map entity to) == ?'
                 -p [$attribute.id]
               )
-              if $result != 0 {
+              if $result {
                 error make {
                   msg: 'invalid operation'
                   label: {
@@ -1095,12 +1447,12 @@ export def 'commands db' [
               WHERE ? IN \((column type-map attribute from), (column type-map attribute to)\)
             "
             for it in $result {
-              let result = (sql-count
+              let result = (sql-exists
                 (table map attribute $it.from $it.to)
                 $"? IN \((column map attribute from), (column map attribute to)\)"
                 -p [$attribute.id]
               )
-              if $result != 0 {
+              if $result {
                 error make {
                   msg: 'invalid operation'
                   label: {
@@ -1110,14 +1462,14 @@ export def 'commands db' [
                 }
               }
             }
-            let result = sql-count (table type-map null) $'(column type-map null to) == ?' -p [$attribute.type]
-            if $result != 0 {
-              let result = (sql-count
+            let result = sql-exists (table type-map null) $'(column type-map null to) == ?' -p [$attribute.type]
+            if $result {
+              let result = (sql-exists
                 (table map null $attribute.type)
                 $'(column map null to) == ?'
                 -p [$attribute.id]
               )
-              if $result != 0 {
+              if $result {
                 error make {
                   msg: 'invalid operation'
                   label: {
@@ -1128,10 +1480,32 @@ export def 'commands db' [
               }
             }
           }
-          sql-delete (table attributes) $'(primary-key) == ?' -p [$attribute.id]
+          sql-delete (table attributes) $'(primary-key) == ?' -p [$attribute.id] | first | update-attribute
         }
       }
     } # attribute
+    'null': {
+      attributes: {
+        args: ({
+        } | schema struct)
+        action: {|cmd|
+          let result = sql-run $"
+            SELECT (column type-map null to) AS types
+            FROM (table type-map null)
+          "
+          $result.types | each {|type|
+            sql-run $"
+              SELECT *
+              FROM (view attributes)
+              WHERE (primary-key) IN \(
+                SELECT (column map attribute to)
+                FROM (table map null $type)
+              \)
+            "
+          } | flatten | update-attribute --view
+        }
+      }
+    } # null
     map: {
       entity: {
         add: {
@@ -1145,12 +1519,12 @@ export def 'commands db' [
             let entity = get-entity $cmd.type $cmd.entity
             let attribute = get-attribute $cmd.attribute --get-schema
             let data = $cmd.data | normalize $attribute.schema
-            let result = (sql-count
+            let result = (sql-exists
               (table type-map entity)
               $'(column type-map entity from) == ? AND (column type-map entity to) == ?'
               -p [$cmd.type $attribute.type]
             )
-            if $result == 0 {
+            if not $result {
               let result = sql-run -p [$attribute.type] $"
                 SELECT (column attribute-types unique) AS is_unique, (column attribute-types columns) AS columns
                 FROM (table attribute-types)
@@ -1202,13 +1576,30 @@ export def 'commands db' [
                   WHERE (primary-key) == NEW.(primary-key);
                 END
               "
+              let view_columns = 0..<($columns) | each { $"m.(column map entity data $in),\n" } | str join
+              let result = sql-run -p [$cmd.type] $"
+                SELECT (column entity-types columns) AS columns
+                FROM (table entity-types)
+                WHERE (column entity-types name) == ?
+              "
+              let source_columns = 0..<($result.0.columns) | each { $"e.(column entity data $in),\n" } | str join
               sql-run $"CREATE VIEW (view map entity $cmd.type $attribute.type)
-                AS SELECT m.(created-at), m.(modified-at), m.(primary-key),
-                e.*,
-                a.(column attributes name) AS (column map entity to),
-                m.*
+                AS SELECT
+                  m.(primary-key),
+                  e.(primary-key) AS (namespaced (column map entity from) (primary-key)),
+                  s.(primary-key) AS (namespaced (column entity source) (primary-key)),
+                  s.(column sources value) AS (column entity source),
+                  ($result.0.columns) AS (column entity-types columns),
+                  ($source_columns)
+                  a.(primary-key) AS (namespaced (column map entity to) (primary-key)),
+                  a.(column attributes name) AS (column map entity to),
+                  ($columns) AS (column attribute-types columns),
+                  ($view_columns)
+                  m.(created-at),
+                  m.(modified-at)
                 FROM (table map entity $cmd.type $attribute.type) m
-                LEFT JOIN (view entity $cmd.type) e ON m.(column map entity from) == e.(primary-key)
+                LEFT JOIN (table entity $cmd.type) e ON m.(column map entity from) == e.(primary-key)
+                LEFT JOIN (table sources) s ON e.(column entity source) == s.(primary-key)
                 LEFT JOIN (table attributes) a ON m.(column map entity to) == a.(primary-key)
               "
               sql-insert (table type-map entity) {
@@ -1219,7 +1610,56 @@ export def 'commands db' [
             sql-insert (table map entity $cmd.type $attribute.type) ({
               (column map entity from): $entity
               (column map entity to): $attribute.id
-            } | data merge {column map entity data $in} $data)
+            } | data merge {column map entity data $in} $data) | first | update-map
+          }
+        }
+        get: {
+          args: ({
+            type: (schema sql ident --strict)
+            attribute: (schema attribute)
+            id: int
+          } | schema struct)
+          action: {|cmd|
+            (sql-exists
+              (table entity-types)
+              $'(column entity-types name) == ?'
+              -p [$cmd.type]
+              -m 'entity type' -s (metadata $cmd.type).span
+            )
+            let attribute = get-attribute $cmd.attribute
+            (sql-exists
+              (table type-map entity)
+              $'(column type-map entity from) == ? AND (column type-map entity to) == ?'
+              -p [$cmd.type, $attribute.type]
+              -m mapping
+            )
+            sql-run -p [$cmd.id $attribute.id] $"
+              SELECT *
+              FROM (view map entity $cmd.type $attribute.type)
+              WHERE (primary-key) == ? AND (namespaced (column map entity to) (primary-key)) == ?
+            " -e 'bad or missing mapping id' -s (metadata $cmd.id).span | first | update-map
+          }
+        }
+        list: {
+          args: ({
+            type: (schema sql ident --strict)
+            entity: (schema entity)
+          } | schema struct)
+          action: {|cmd|
+            let entity = get-entity $cmd.type $cmd.entity
+            let result = sql-run -p [$cmd.type] $"
+              SELECT (column type-map entity to) AS types
+              FROM (table type-map entity)
+              WHERE (column type-map entity from) == ?
+            "
+            $result.types | each {|type|
+              let result = sql-run -p [$entity] $"
+                SELECT *
+                FROM (view map entity $cmd.type $type)
+                WHERE (namespaced (column map entity from) (primary-key)) == ?
+              " | update-map
+              [$type, $result]
+            } | into record
           }
         }
         update: {
@@ -1231,38 +1671,27 @@ export def 'commands db' [
             data: [[]] # match against attribute-type->schema
           } | schema struct)
           action: {|cmd|
-            let result = sql-count (table entity-types) $'(column entity-types name) == ?' -p [$cmd.type]
-            if $result == 0 {
-              error make {
-                msg: "invalid operation"
-                label: {
-                  text: "unkown entity type"
-                  span: (metadata $cmd.type).span
-                }
-              }
-            }
+            (sql-exists
+              (table entity-types)
+              $'(column entity-types name) == ?'
+              -p [$cmd.type]
+              -m 'entity type' -s (metadata $cmd.type).span
+            )
             let attribute = get-attribute $cmd.attribute --get-schema
             let data = $cmd.data | normalize $attribute.schema
-            let result = (sql-count
+            let result = (sql-exists
               (table type-map entity)
               $'(column type-map entity from) == ? AND (column type-map entity to) == ?'
               -p [$cmd.type, $attribute.type]
+              -m mapping
             )
-            if $result == 0 {
-              error make {
-                msg: 'invalid operation'
-                label: {
-                  text: 'invalid mapping (table does not exist)'
-                }
-              }
-            }
             (sql-update
               (table map entity $cmd.type $attribute.type)
               $"(primary-key) == ? AND (column map entity to) == ?"
               -p [$cmd.id, $attribute.id]
               (data merge {column map entity data $in} $data)
               -e 'bad or missing mapping data'
-            )
+            ) | first | update-map
           }
         }
         delete: {
@@ -1272,36 +1701,25 @@ export def 'commands db' [
             id: int
           } | schema struct)
           action: {|cmd|
-            let result = sql-count (table entity-types) $'(column entity-types name) == ?' -p [$cmd.type]
-            if $result == 0 {
-              error make {
-                msg: "invalid operation"
-                label: {
-                  text: "unkown entity type"
-                  span: (metadata $cmd.type).span
-                }
-              }
-            }
+            (sql-exists
+              (table entity-types)
+              $'(column entity-types name) == ?'
+              -p [$cmd.type]
+              -m 'entity type' -s (metadata $cmd.type).span
+            )
             let attribute = get-attribute $cmd.attribute
-            let result = (sql-count
+            (sql-exists
               (table type-map entity)
               $'(column type-map entity from) == ? AND (column type-map entity to) == ?'
               -p [$cmd.type, $attribute.type]
+              -m mapping
             )
-            if $result == 0 {
-              error make {
-                msg: 'invalid operation'
-                label: {
-                  text: 'invalid mapping (table does not exist)'
-                }
-              }
-            }
             (sql-delete
               (table map entity $cmd.type $attribute.type)
               $"(primary-key) == ? AND (column map entity to) == ?"
               -p [$cmd.id, $attribute.id]
               -e 'bad or mising mapping id'
-            )
+            ) | first | update-map
           }
         }
       } # entity
@@ -1316,12 +1734,12 @@ export def 'commands db' [
             let from = get-attribute $cmd.from
             let to = get-attribute $cmd.to --get-schema
             let data = $cmd.data | normalize $to.schema
-            let result = (sql-count
+            let result = (sql-exists
               (table type-map attribute)
               $'(column type-map attribute from) == ? AND (column type-map attribute to) == ?'
               -p [$from.type, $to.type]
             )
-            if $result == 0 {
+            if not $result {
               let result = sql-run -p [$to.type] $"
                 SELECT (column attribute-types unique) AS is_unique, (column attribute-types columns) AS columns
                 FROM (table attribute-types)
@@ -1373,11 +1791,18 @@ export def 'commands db' [
                   WHERE (primary-key) == NEW.(primary-key);
                 END
               "
+              let view_columns = 0..<($columns) | each { $"m.(column map attribute data $in),\n" } | str join
               sql-run $"CREATE VIEW (view map attribute $from.type $to.type)
-                AS SELECT m.(created-at), m.(modified-at), m.(primary-key),
-                  f.(column attribute-types name) AS (column map attribute from),
-                  t.(column attribute-types name) AS (column map attribute to),
-                  m.*
+                AS SELECT
+                  m.(primary-key),
+                  f.(primary-key) AS (namespaced (column map attribute from) (primary-key)),
+                  f.(column attributes name) AS (column map attribute from),
+                  t.(primary-key) AS (namespaced (column map attribute to) (primary-key)),
+                  t.(column attributes name) AS (column map attribute to),
+                  ($columns) AS (column attribute-types columns),
+                  ($view_columns)
+                  m.(created-at),
+                  m.(modified-at)
                 FROM (table map attribute $from.type $to.type) m
                 LEFT JOIN (table attributes) f ON m.(column map attribute from) == f.(primary-key)
                 LEFT JOIN (table attributes) t ON m.(column map attribute to) == t.(primary-key)
@@ -1390,7 +1815,52 @@ export def 'commands db' [
             sql-insert (table map attribute $from.type $to.type) ({
               (column map attribute from): $from.id
               (column map attribute to): $to.id
-            } | data merge {column map attribute data $in} $data)
+            } | data merge {column map attribute data $in} $data) | first | update-map
+          }
+        }
+        get: {
+          args: ({
+            from: (schema attribute)
+            to: (schema attribute)
+            id: int
+          } | schema struct)
+          action: {|cmd|
+            let from = get-attribute $cmd.from
+            let to = get-attribute $cmd.to
+            (sql-exists
+              (table type-map attribute)
+              $'(column type-map attribute from) == ? AND (column type-map attribute to) == ?'
+              -p [$from.type, $to.type]
+              -m mapping
+            )
+            sql-run -p [$cmd.id, $from.id, $to.id] $"
+              SELECT *
+              FROM (view map attribute $from.type $to.type)
+              WHERE (primary-key) == ? AND
+                (namespaced (column map attribute from) (primary-key)) == ? AND
+                (namespaced (column map attribute to) (primary-key)) == ?
+            " -e 'bad or missing mapping id' -s (metadata $cmd.id).span | first | update-map
+          }
+        }
+        list: {
+          args: ({
+            attribute: (schema attribute)
+          } | schema struct --wrap-single)
+          action: {|cmd|
+            let attribute = get-attribute $cmd.attribute
+            let result = sql-run -p [$attribute.type] $"
+              SELECT (column type-map attribute to) AS types
+              FROM (table type-map attribute)
+              WHERE (column type-map attribute from) == ?
+            "
+            $result.types | each {|type|
+              let result = sql-run -p [$attribute.id] $"
+                SELECT *
+                FROM (view map attribute $attribute.type $type)
+                WHERE (namespaced (column map attribute from) (primary-key)) == ?
+              " | update-map
+              [$type, $result]
+            } | into record
           }
         }
         update: {
@@ -1405,26 +1875,19 @@ export def 'commands db' [
             let from = get-attribute $cmd.from
             let to = get-attribute $cmd.to --get-schema
             let data = $cmd.data | normalize $to.schema
-            let result = (sql-count
+            let result = (sql-exists
               (table type-map attribute)
               $'(column type-map attribute from) == ? AND (column type-map attribute to) == ?'
               -p [$from.type, $to.type]
+              -m mapping
             )
-            if $result == 0 {
-              error make {
-                msg: 'invalid operation'
-                label: {
-                  text: 'invalid mapping (table does not exist)'
-                }
-              }
-            }
             (sql-update
               (table map attribute $from.type $to.type)
               $"(primary-key) == ? AND (column map attribute from) == ? AND (column map attribute to) == ?"
               -p [$cmd.id, $from.id, $to.id]
               (data merge {column map attribute data $in} $data)
               -e 'bad or missing mapping id'
-            )
+            ) | first | update-map
           }
         }
         delete: {
@@ -1436,25 +1899,18 @@ export def 'commands db' [
           action: {|cmd|
             let from = get-attribute $cmd.from
             let to = get-attribute $cmd.to
-            let result = (sql-count
+            (sql-exists
               (table type-map attribute)
               $'(column type-map attribute from) == ? AND (column type-map attribute to) == ?'
               -p [$from.type, $to.type]
+              -m mapping
             )
-            if $result == 0 {
-              error make {
-                msg: 'invalid operation'
-                label: {
-                  text: 'invalid mapping (table does not exist)'
-                }
-              }
-            }
             (sql-delete
               (table map attribute $from.type $to.type)
               $'(primary-key) == ? AND (column map attribute from) == ? AND (column map attribute to) == ?'
               -p [$cmd.id, $from, $to]
               -e 'bad or missing mapping id'
-            )
+            ) | first | update-map
           }
         }
       } # attribute
@@ -1467,8 +1923,8 @@ export def 'commands db' [
           action: {|cmd|
             let attribute = get-attribute $cmd.attribute --get-schema
             let data = $cmd.data | normalize $attribute.schema
-            let result = sql-count (table type-map null) $'(column type-map null to) == ?' -p [$attribute.type]
-            if $result == 0 {
+            let result = sql-exists (table type-map null) $'(column type-map null to) == ?' -p [$attribute.type]
+            if not $result {
               let result = sql-run -p [$attribute.type] $"
                 SELECT (column attribute-types unique) AS is_unique, (column attribute-types columns) AS columns
                 FROM (table attribute-types)
@@ -1506,10 +1962,16 @@ export def 'commands db' [
                   WHERE (primary-key) == NEW.(primary-key);
                 END
               "
+              let view_columns = 0..<($columns) | each { $"m.(column map null data $in),\n" } | str join
               sql-run $"CREATE VIEW (view map null $attribute.type)
-                AS SELECT m.(created-at), m.(modified-at), m.(primary-key),
-                  a.(column attribute-types name) AS (column map null to),
-                  m.*
+                AS SELECT
+                  m.(primary-key),
+                  a.(primary-key) AS (namespaced (column map null to) (primary-key)),
+                  a.(column attributes name) AS (column map null to),
+                  ($columns) AS (column attribute-types columns),
+                  ($view_columns)
+                  m.(created-at),
+                  m.(modified-at)
                 FROM (table map null $attribute.type) m
                 LEFT JOIN (table attributes) a ON m.(column map null to) == a.(primary-key)
               "
@@ -1519,7 +1981,43 @@ export def 'commands db' [
             }
             sql-insert (table map null $attribute.type) ({
               (column map null to): $attribute.id
-            } | data merge {column map null data $in} $data)
+            } | data merge {column map null data $in} $data) | first | update-map
+          }
+        }
+        get: {
+          args: ({
+            attribute: (schema attribute)
+            id: int
+          } | schema struct)
+          action: {|cmd|
+            let attribute = get-attribute $cmd.attribute
+            (sql-exists
+              (table type-map null)
+              $'(column type-map null to) == ?'
+              -p [$attribute.type]
+              -m mapping
+            )
+            sql-run -p [$cmd.id, $attribute.id] $"
+              SELECT *
+              FROM (view map null $attribute.type)
+              WHERE (primary-key) == ? AND (namespaced (column map null to) (primary-key)) == ?
+            " -e 'bad or missing mapping id' -s (metadata $cmd.id).span | first | update-map
+          }
+        }
+        list: {
+          args: ({} | schema struct)
+          action: {|cmd|
+            let result = sql-run $"
+              SELECT (column type-map null to) AS types
+              FROM (table type-map attribute)
+            "
+            $result.types | each {|type|
+              let result = sql-run $"
+                SELECT *
+                FROM (view map null $type)
+              " | update-map
+              [$type, $result]
+            } | into record
           }
         }
         update: {
@@ -1532,22 +2030,19 @@ export def 'commands db' [
           action: {|cmd|
             let attribute = get-attribute $cmd.attribute --get-schema
             let data = $cmd.data | normalize $attribute.schema
-            let result = sql-count (table type-map null) $'(column type-map null to) == ?' -p [$attribute.type]
-            if $result == 0 {
-              error make {
-                msg: 'invalid operation'
-                label: {
-                  text: 'invalid mapping (table does not exist)'
-                }
-              }
-            }
+            (sql-exists
+              (table type-map null)
+              $'(column type-map null to) == ?'
+              -p [$attribute.type]
+              -m mapping
+            )
             (sql-update
               (table map null $attribute.type)
               $"(primary-key) == ? AND (column map null to) == ?"
               -p [$cmd.id, $attribute.id]
               (data merge {column map null data $in} $data)
               -e 'bad or missing mapping id'
-            )
+            ) | first | update-map
           }
         }
         delete: {
@@ -1557,21 +2052,18 @@ export def 'commands db' [
           } | schema struct)
           action: {|cmd|
             let attribute = get-attribute $cmd.attribute
-            let result = sql-count (table type-map null) $'(column type-map null to) == ?' -p [$attribute.type]
-            if $result == 0 {
-              error make {
-                msg: 'invalid operation'
-                label: {
-                  text: 'invalid mapping (table does not exist)'
-                }
-              }
-            }
+            (sql-exists
+              (table type-map null)
+              $'(column type-map null to) == ?'
+              -p [$attribute.type]
+              -m mapping
+            )
             (sql-delete
               (table map null $attribute.type)
               $'(primary-key) == ? AND (column map null to) == ?'
               -p [$cmd.id, $attribute.id]
               -e 'bad or missing mapping id'
-            )
+            ) | first | update-map
           }
         }
       } # null
