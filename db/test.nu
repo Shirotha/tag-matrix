@@ -416,6 +416,7 @@ export def main [
       $cmds | run $.db.map.null.update $m --silent (not $profile)
     }
     # TODO: test invalid null map updates
+    # TODO: test schema modifications (db.*.patch)
     stor print -l 'after changes' --cmds $cmds
   }
   if $delete {
