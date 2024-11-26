@@ -1,7 +1,7 @@
-use commands.nu *
+use ../tag-matrix/db/commands/
 
 # give test arguments for entity types
-export def 'data entity-types' [
+def 'data entity-types' [
   --invalid (-i) # return invalid data instead
 ] {
   if $invalid {[
@@ -13,7 +13,7 @@ export def 'data entity-types' [
   ]}
 }
 # give test arguments for attribute types
-export def 'data attribute-types' [
+def 'data attribute-types' [
   --invalid (-i) # return invalid data instead
 ] {
   if $invalid {[
@@ -27,7 +27,7 @@ export def 'data attribute-types' [
   ]}
 }
 # give test arguments for attributes
-export def 'data attributes' [
+def 'data attributes' [
   --invalid (-i) # return invalid data instead
   --rename (-r) # return rename operations instead
 ] {
@@ -51,7 +51,7 @@ export def 'data attributes' [
   }
 }
 # give test arguments for sources
-export def 'data sources' [
+def 'data sources' [
   --move (-m) # return moving operations instead
 ] {
   if $move {[
@@ -61,7 +61,7 @@ export def 'data sources' [
     {value: ((seq char A E) | each {|it| 'Source ' + $it })}
   }
 }
-export def 'data entities' [
+def 'data entities' [
   --invalid (-i) # return invalid data instead
   --move (-m) # return moving operations instead
 ] {
@@ -89,7 +89,7 @@ export def 'data entities' [
     ]}
   }
 }
-export def 'data map entities' [
+def 'data map entities' [
   --invalid (-i) # return invalid data instead
   --update (-u) # return update operations instead
 ] {
@@ -114,7 +114,7 @@ export def 'data map entities' [
     ]}
   }
 }
-export def 'data map attributes' [
+def 'data map attributes' [
   --invalid (-i) # return invalid data instead
   --update (-u) # return update operations instead
 ] {
@@ -134,7 +134,7 @@ export def 'data map attributes' [
     ]}
   }
 }
-export def 'data map null' [
+def 'data map null' [
   --invalid (-i) # return invalid data instead
   --update (-u) # return update operations instead
 ] {
@@ -157,7 +157,7 @@ export def 'data map null' [
 }
 
 # execute command my name
-export def run [
+def run [
   cmd: cell-path
   args: any
   --silent (-s): any # bool
@@ -187,7 +187,7 @@ def colorize [
 ]: any -> string {
   debug | nu-highlight
 }
-export def 'commands debug' [
+def 'commands debug' [
 ]: record<db> -> record {
   plugin use schema
   let cmds = $in
@@ -294,10 +294,10 @@ export def 'commands debug' [
     } # print
   }}
 }
-export def 'stor collect' [
+def 'stor collect' [
   --no-timings (-t)
 ] {
-  use naming.nu *
+  use ../tag-matrix/db/naming.nu *
   mut result = {}
   let tables = stor open | query db 'SELECT name FROM sqlite_master WHERE type IN ("table", "view")' | get name
   for table in $tables {
@@ -327,7 +327,7 @@ export def 'stor collect' [
   $result
 }
 # print the in-memory sqlite database
-export def 'stor print' [
+def 'stor print' [
   --label (-l): string
   --cmds: record<debug>
 ] {
@@ -352,7 +352,7 @@ export def 'stor print' [
   }
 }
 
-export def main [
+def main [
   --save (-s): string # store final database in file
   --modify (-m) # test modifiing data
   --delete (-d) # test deletion of database
@@ -433,4 +433,8 @@ export def main [
   if ($save | is-not-empty) {
     stor export -f $save
   }
+}
+
+export def test-db [] {
+  main --modify --delete
 }
