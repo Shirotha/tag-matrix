@@ -24,6 +24,7 @@ export def deep-merge [
 
 export def init [
   --file (-f): path
+  --config (-c): record
 ]: nothing -> record {
   let db = if ($file | is-not-empty) {
     open $file
@@ -33,5 +34,5 @@ export def init [
   if ($db | describe -d) != {type: custom, subtype: SQLiteDatabase} {
     error make {msg: "input was not a valid sqlite database"}
   }
-  {__connection: $db}
+  {__connection: $db, __config: $config}
 }

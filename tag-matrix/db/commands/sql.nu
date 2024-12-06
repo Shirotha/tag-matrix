@@ -13,7 +13,7 @@ export def main [
       args: ({
         query: string
         params: [[]]
-      } | schema struct --wrap-missing)
+      } | schema struct --wrap-single --wrap-missing)
       action: {|cmd|
         $db | query db $cmd.query -p $cmd.params
       }

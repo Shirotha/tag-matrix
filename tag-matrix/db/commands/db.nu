@@ -642,8 +642,7 @@ export def main [
   }
   $in | merge {db: {
     init: {
-      args: ({
-      } | schema struct)
+      args: ({} | schema struct --wrap-null)
       action: {|cmd|
         sql-run 'PRAGMA foreign_keys = ON'
         sql-run 'PRAGMA recursive_triggers = OFF'
@@ -771,7 +770,7 @@ export def main [
       }
     } # init
     clean: {
-      args: ({} | schema struct)
+      args: ({} | schema struct --wrap-null)
       action: {|cmd|
         let result = sql-run $"
           SELECT (column type-map entity from) AS from_, (column type-map entity to) AS to_, rowid
@@ -825,7 +824,7 @@ export def main [
     } # clean
     version: {
       get: {
-        args: ({} | schema struct)
+        args: ({} | schema struct --wrap-null)
         action: {|cmd|
           sql-run $"
             SELECT
@@ -934,7 +933,7 @@ export def main [
         args: ({
           name: (schema sql ident --strict)
           schema: (schema data-arg)
-        } | schema struct --wrap-missing)
+        } | schema struct --wrap-single --wrap-missing)
         action: {|cmd|
           let columns = $cmd.schema | length
           create-entity-table $cmd.name $columns
@@ -958,7 +957,7 @@ export def main [
         }
       }
       list: {
-        args: ({} | schema struct)
+        args: ({} | schema struct --wrap-null)
         action: {|cmd|
           sql-run $"
             SELECT *
@@ -1062,7 +1061,7 @@ export def main [
           name: (schema sql ident --strict)
           unique: [[nothing {fallback: false}] bool]
           columns: [[nothing {fallback: 0}] (schema uint)]
-        } | schema struct --wrap-missing)
+        } | schema struct --wrap-single --wrap-missing)
         action: {|cmd|
           sql-insert (table attribute-types) {
             (column attribute-types name): $cmd.name
@@ -1084,7 +1083,7 @@ export def main [
         }
       }
       list: {
-        args: ({} | schema struct)
+        args: ({} | schema struct --wrap-null)
         action: {|cmd|
           sql-run $"
             SELECT *
@@ -1200,7 +1199,7 @@ export def main [
       add: {
         args: ({
           value: ('string' | schema array --wrap-single)
-        } | schema struct)
+        } | schema struct --wrap-single)
         action: {|cmd|
           sql-insert (table sources) ($cmd.value | wrap (column sources value)) | update-source
         }
@@ -1231,7 +1230,7 @@ export def main [
         }
       }
       list: {
-        args: ({} | schema struct)
+        args: ({} | schema struct --wrap-null)
         action: {|cmd|
           sql-run $"
             SELECT *
@@ -1389,8 +1388,8 @@ export def main [
       with: {
         attribute: {
           args: ({
-            type: [(schema sql ident --strict) nothing]
             attribute: (schema attribute)
+            type: [(schema sql ident --strict) nothing]
           } | schema struct --wrap-single --wrap-missing)
           action: {|cmd|
             let attribute = get-attribute $cmd.attribute
@@ -1521,7 +1520,7 @@ export def main [
         }
       }
       list: {
-        args: ({} | schema struct --wrap-single --wrap-missing)
+        args: ({} | schema struct --wrap-null)
         action: {|cmd|
           sql-run $"
             SELECT *
@@ -1744,8 +1743,7 @@ export def main [
     } # attribute
     'null': {
       attributes: {
-        args: ({
-        } | schema struct)
+        args: ({} | schema struct --wrap-null)
         action: {|cmd|
           let result = sql-run $"
             SELECT (column type-map null to) AS types
@@ -1820,11 +1818,41 @@ export def main [
               -p [$cmd.type, $attribute.type]
               -m mapping
             )
-            sql-run -p [$cmd.id $attribute.id] $"
+            sql-run -p [$cmd.id, $attribute.id] $"
               SELECT *
               FROM (view map entity $cmd.type $attribute.type)
               WHERE (primary-key) == ? AND (namespaced (column map entity to) (primary-key)) == ?
             " -e 'bad or missing mapping id' -s (metadata $cmd.id).span | first | update-map
+          }
+        }
+        get-all: {
+          args: ({
+            type: (schema sql ident --strict)
+            entity: (schema entity)
+            attribute: (schema attribute)
+          } | schema struct)
+          action: {|cmd|
+            (sql-exists
+              (table entity-types)
+              $'(column entity-types name) == ?'
+              -p [$cmd.type]
+              -m 'entity type' -s (metadata $cmd.type).span
+            )
+            let attribute = get-attribute $cmd.attribute
+            let result = (sql-exists
+              (table type-map entity)
+              $'(column type-map entity from) == ? AND (column type-map entity to) == ?'
+              -p [$cmd.type, $attribute.type]
+            )
+            if $result {
+              let entity = get-entity $cmd.type $cmd.entity
+              sql-run -p [$entity, $attribute.id] $"
+                SELECT *
+                FROM (view map entity $cmd.type $attribute.type)
+                WHERE (namespaced (column map entity from) (primary-key)) == ?
+                  AND (namespaced (column map entity to) (primary-key)) == ?
+              " | update-map
+            } else { [] }
           }
         }
         list: {
@@ -1968,6 +1996,29 @@ export def main [
             " -e 'bad or missing mapping id' -s (metadata $cmd.id).span | first | update-map
           }
         }
+        get-all: {
+          args: ({
+            from: (schema attribute)
+            to: (schema attribute)
+          } | schema struct)
+          action: {|cmd|
+            let from = get-attribute $cmd.from
+            let to = get-attribute $cmd.to
+            let result = (sql-exists
+              (table type-map attribute)
+              $'(column type-map attribute from) == ? AND (column type-map attribute to) == ?'
+              -p [$from.type, $to.type]
+            )
+            if $result {
+              sql-run -p [$from.id, $to.id] $"
+                SELECT *
+                FROM (view map attribute $from.type $to.type)
+                WHERE (namespaced (column map attribute from) (primary-key)) == ?
+                  AND (namespaced (column map attribute to) (primary-key)) == ?
+              " | update-map
+            } else { [] }
+          }
+        }
         list: {
           args: ({
             attribute: (schema attribute)
@@ -2086,8 +2137,28 @@ export def main [
             " -e 'bad or missing mapping id' -s (metadata $cmd.id).span | first | update-map
           }
         }
+        get-all: {
+          args: ({
+            attribute: (schema attribute)
+          } | schema struct)
+          action: {|cmd|
+            let attribute = get-attribute $cmd.attribute
+            let result = (sql-exists
+              (table type-map null)
+              $'(column type-map null to) == ?'
+              -p [$attribute.type]
+            )
+            if $result {
+              sql-run -p [$attribute.id] $"
+                SELECT *
+                FROM (view map null $attribute.type)
+                WHERE (namespaced (column map null to) (primary-key)) == ?
+              " | update-map
+            } else { [] }
+          }
+        }
         list: {
-          args: ({} | schema struct)
+          args: ({} | schema struct --wrap-null)
           action: {|cmd|
             let result = sql-run $"
               SELECT (column type-map null to) AS types
